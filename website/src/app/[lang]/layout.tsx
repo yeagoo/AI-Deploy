@@ -20,7 +20,7 @@ export const metadata: Metadata = {
   },
   description:
     'A read-only-first deployment safety controller for registry, backup, recovery, approval, and signed evidence.',
-  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'https://ai-deploy.pages.dev'),
+  metadataBase: new URL(process.env.NEXT_PUBLIC_SITE_URL ?? 'https://ai-deploy-7a3.pages.dev'),
   icons: {
     icon: '/icon.svg',
   },

@@ -5,7 +5,7 @@ import { i18n } from '@/lib/i18n';
 export const dynamic = 'force-static';
 
 export default function sitemap(): MetadataRoute.Sitemap {
-  const base = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://ai-deploy.pages.dev';
+  const base = process.env.NEXT_PUBLIC_SITE_URL ?? 'https://ai-deploy-7a3.pages.dev';
   const landingPages = i18n.languages.map((lang) => ({
     url: new URL(`/${lang}`, base).toString(),
     changeFrequency: 'weekly' as const,

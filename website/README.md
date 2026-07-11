@@ -38,7 +38,7 @@ bun run check
 
 ## Cloudflare Pages
 
-The default production origin is `https://ai-deploy.pages.dev`. Override it for a custom domain with `NEXT_PUBLIC_SITE_URL` before building.
+The default production origin is `https://ai-deploy-7a3.pages.dev`. Override it for a custom domain with `NEXT_PUBLIC_SITE_URL` before building.
 
 ```bash
 bun run check
