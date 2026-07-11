@@ -1,0 +1,35 @@
+[graph]
+all-features = true
+
+[advisories]
+ignore = []
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "MIT",
+    "MIT-0",
+    "Unicode-3.0",
+    "Zlib",
+]
+confidence-threshold = 0.8
+
+[licenses.private]
+ignore = false
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+skip = [
+    { crate = "hashbrown@0.14.5", reason = "transitive rusqlite/hashlink dependency while indexmap/ratatui use hashbrown 0.17.x" },
+    { crate = "hashbrown@0.16.1", reason = "transitive kasuari/referencing dependency while indexmap/ratatui use hashbrown 0.17.x" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

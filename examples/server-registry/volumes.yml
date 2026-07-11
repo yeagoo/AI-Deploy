@@ -1,0 +1,29 @@
+version: 1
+volumes:
+  - id: rankfan-mysql
+    name: phprank-mysql
+    service_id: rankfan-new
+    kind: docker_volume
+    contains:
+      - mysql-data
+    backup_policy: before_deploy
+    protected: true
+
+  - id: rankfan-redis
+    name: phprank-redis
+    service_id: rankfan-new
+    kind: docker_volume
+    contains:
+      - redis-data
+    backup_policy: before_deploy
+    protected: true
+
+  - id: pcafe-pg-data
+    name: pcafe-pg-data
+    service_id: pcafev2
+    kind: docker_volume
+    contains:
+      - postgres-data
+    backup_policy: before_deploy
+    protected: true
+

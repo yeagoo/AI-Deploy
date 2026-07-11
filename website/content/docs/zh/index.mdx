@@ -1,0 +1,40 @@
+---
+title: 产品概览
+description: opsctl 是一个默认只读、证据优先的单机部署安全控制器。
+icon: BookOpen
+---
+
+opsctl 用一套类型化工作流连接服务器注册表、变更前检查、备份恢复、人工审批和可验证审计。它面向只有一台或少量服务器、但仍然需要生产级安全边界的团队。
+
+<Callout type="info" title="核心原则">
+  AI 可以观察、解释和生成计划，但不能凭模糊授权批准自己，也不能把破坏性资源清理包装成自动化。
+</Callout>
+
+## 你可以用它做什么
+
+<Cards>
+  <Card title="快速开始" description="安装、验证 registry，并运行第一次只读检查。" href="./getting-started" />
+  <Card title="理解安全模型" description="默认只读、全局锁、审批与执行边界。" href="./safety-model" />
+  <Card title="配置 Registry" description="声明服务、端口、域名、卷和备份策略。" href="./registry" />
+  <Card title="备份与恢复" description="从计划、备份、仓库检查到隔离恢复演练。" href="./backup-recovery" />
+  <Card title="证据治理" description="签名、checkpoint、归档和 retention attestation。" href="./evidence-governance" />
+  <Card title="CLI 参考" description="常用只读与受控执行命令。" href="./cli-reference" />
+</Cards>
+
+## 工作方式
+
+1. **声明意图**：YAML registry 是期望状态的事实源。
+2. **观察现实**：扫描器读取 systemd、Docker、端口和 Caddy 状态。
+3. **解释差异**：doctor、drift 与 preflight 给出结构化风险结论。
+4. **建立恢复能力**：快照、备份、仓库检查和隔离恢复形成证据。
+5. **人工交接**：只有具体、未过期并与作用域匹配的审批才能推进受控执行。
+
+## 刻意不做的事
+
+- 不自动批准生产变更。
+- 不自动删除 Docker 卷。
+- 不把 MCP 暴露为写入或执行接口。
+- 不把一次备份成功当作恢复可用。
+- 不在报告中输出凭据值。
+
+继续阅读[快速开始](./getting-started)，用一次完全只读的检查认识 opsctl。

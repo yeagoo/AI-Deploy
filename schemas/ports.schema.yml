@@ -1,0 +1,63 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://opsctl.local/schemas/ports.schema.yml
+title: opsctl ports registry
+type: object
+additionalProperties: false
+required:
+  - version
+  - ports
+properties:
+  version:
+    type: integer
+    minimum: 1
+  ports:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - port
+        - protocol
+        - bind
+        - service_id
+        - exposure
+        - source
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        port:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        protocol:
+          type: string
+          enum:
+            - tcp
+            - udp
+        bind:
+          type: string
+        service_id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        purpose:
+          type: string
+        exposure:
+          type: string
+          enum:
+            - public
+            - localhost
+            - private_network
+            - docker_internal
+            - external
+            - unknown
+        source:
+          type: string
+          enum:
+            - registered
+            - observed
+            - reserved
+        notes:
+          type: string
+

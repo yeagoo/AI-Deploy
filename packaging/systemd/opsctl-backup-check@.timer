@@ -1,0 +1,12 @@
+[Unit]
+Description=Run opsctl backup repository check for %i weekly
+
+[Timer]
+OnCalendar=Mon *-*-* 00:00:00
+RandomizedDelaySec=23h
+FixedRandomDelay=true
+AccuracySec=1m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

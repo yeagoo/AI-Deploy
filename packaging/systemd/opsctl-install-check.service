@@ -1,0 +1,7 @@
+[Unit]
+Description=opsctl installation layout check
+Documentation=file:/usr/share/doc/opsctl/DEBIAN_INSTALL.md
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check

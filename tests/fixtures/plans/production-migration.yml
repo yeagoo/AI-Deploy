@@ -1,0 +1,22 @@
+id: deploy_phase4_migration
+actor: tester
+project_root: /home/ivmm/tools/deploy-tools
+intent: deploy
+environment: production
+changes:
+  ports:
+    reserve:
+      - 39991
+  docker:
+    compose_project: phase4-migration
+    containers:
+      - phase4-migration-app
+    volumes:
+      - phase4-migration-data
+  migrations:
+    required: true
+    command: npm run db:migrate
+  destructive_ops: []
+snapshot_required: true
+preflight:
+  status: pending

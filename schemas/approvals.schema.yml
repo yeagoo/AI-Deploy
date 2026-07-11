@@ -1,0 +1,55 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://opsctl.local/schemas/approvals.schema.yml
+title: opsctl approval record
+type: object
+additionalProperties: false
+required:
+  - id
+  - plan_id
+  - status
+  - requested_by
+  - reason
+properties:
+  id:
+    type: string
+    pattern: "^appr_[a-z0-9][a-z0-9_-]*$"
+  plan_id:
+    type: string
+    pattern: "^deploy_[a-z0-9][a-z0-9_-]*$"
+  status:
+    type: string
+    enum:
+      - requested
+      - approved
+      - rejected
+      - expired
+  requested_by:
+    type: string
+  approved_by:
+    type: string
+  decided_by:
+    type: string
+  decided_at:
+    type: string
+    format: date-time
+  decision_reason:
+    type: string
+  requested_at:
+    type: string
+    format: date-time
+  expires_at:
+    type: string
+    format: date-time
+  reason:
+    type: string
+    minLength: 1
+  scope:
+    type: array
+    items:
+      type: string
+  constraints:
+    type: array
+    items:
+      type: string
+  notes:
+    type: string

@@ -1,0 +1,13 @@
+id: deploy_stale_preflight
+actor: tester
+project_root: /home/ivmm/tools/deploy-tools
+intent: deploy
+environment: production
+changes:
+  ports:
+    reserve:
+      - 39800
+  destructive_ops: []
+snapshot_required: true
+preflight:
+  status: passed

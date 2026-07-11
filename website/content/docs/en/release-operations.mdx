@@ -1,0 +1,44 @@
+---
+title: Release and rollback
+description: Gate, sign, rehearse, and decide on one exact candidate artifact.
+icon: GitCompareArrows
+---
+
+A formal release requires source identity, build artifact, tests, upgrade path, and tag to refer to the same candidate.
+
+## Release gate
+
+```bash
+OPSCTL_GATE_QUALITY=1 \
+OPSCTL_GATE_DEB_TEST=1 \
+OPSCTL_GATE_RELEASE=1 \
+scripts/release-gate.sh
+```
+
+The gate covers formatting, strict Clippy, tests, failure matrix, dependency audit, Debian installation regression, and release-manifest verification. A root-only Docker host can explicitly elevate only the disposable Debian container test.
+
+## Upgrade and rollback rehearsal
+
+Patch releases should provide the exact previous package and prove:
+
+```text
+previous → candidate → previous → candidate → remove
+```
+
+The rehearsal verifies registry/state sentinels, removal of candidate-only units, idempotent reinstall, and stable data preservation after package removal.
+
+## Go / No-Go
+
+A Go decision needs at least:
+
+- An authentic Git commit and unique version.
+- Verified release manifest and checksums.
+- No unresolved Critical or High review finding.
+- Backup, recovery, and evidence gates required by release policy.
+- Retained rollback package and recovery instructions.
+
+If release identity collides, authentic Git history is missing, or required governance evidence is absent, publish No-Go rather than create a tag with unprovable provenance.
+
+## Rollback principle
+
+Package rollback and data restoration are separate operations. Normally downgrade the package and verify `install-check` first. Restore registry/state only after an independently confirmed data-integrity incident.

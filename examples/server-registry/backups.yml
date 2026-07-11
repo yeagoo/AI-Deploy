@@ -1,0 +1,165 @@
+version: 1
+repositories:
+- id: restic-r2-main
+  provider: restic
+  repository_env: RESTIC_REPOSITORY
+  password_env: RESTIC_PASSWORD
+  env:
+  - AWS_ACCESS_KEY_ID
+  - AWS_SECRET_ACCESS_KEY
+  status: active
+  retention:
+    keep_daily: 7
+    keep_weekly: 4
+    keep_monthly: 6
+  check_after_backup: true
+  notes: Example Restic repository configuration. Values must be supplied through environment variables.
+targets:
+- id: caddy-restic
+  service_id: caddy
+  repository_id: restic-r2-main
+  include_paths:
+  - /etc/caddy
+  exclude_paths: []
+  tags:
+  - production
+  - before-deploy
+  database_dumps: []
+  schedule: before_deploy
+  status: active
+  notes: Captures Caddy configuration before route changes.
+- id: rankfan-new-restic
+  service_id: rankfan-new
+  repository_id: restic-r2-main
+  include_paths:
+  - /home/ivmm/rankfan-new
+  - /var/lib/opsctl/backup-dumps/rankfan-new
+  exclude_paths:
+  - /home/ivmm/rankfan-new/vendor
+  - /home/ivmm/rankfan-new/node_modules
+  tags:
+  - production
+  - before-deploy
+  database_dumps:
+  - id: rankfan-mysql-dump
+    kind: mysql
+    container: phprank-db
+    database: configured-by-env
+    output_path: /var/lib/opsctl/backup-dumps/rankfan-new/mysql.sql.zst
+    notes: Dump command can be executed by controlled CLI backup and snapshot flows.
+  schedule: before_deploy
+  status: active
+- id: pcafev2-restic
+  service_id: pcafev2
+  repository_id: restic-r2-main
+  include_paths:
+  - /home/ivmm/daohang/pcafev2
+  - /var/lib/opsctl/backup-dumps/pcafev2
+  exclude_paths:
+  - /home/ivmm/daohang/pcafev2/node_modules
+  - /home/ivmm/daohang/pcafev2/.next/cache
+  tags:
+  - production
+  - before-deploy
+  database_dumps:
+  - id: pcafe-postgres-dump
+    kind: postgres
+    container: pcafe-db
+    database: configured-by-env
+    output_path: /var/lib/opsctl/backup-dumps/pcafev2/postgres.sql.zst
+    notes: Dump command can be executed by controlled CLI backup and snapshot flows.
+  schedule: before_deploy
+  status: active
+- id: mariadb-edu-rich-external
+  service_id: mariadb-edu-rich
+  repository_id: restic-r2-main
+  include_paths:
+  - /home/ivmm/seo-website/mariadb
+  exclude_paths: []
+  tags:
+  - external
+  database_dumps: []
+  schedule: external
+  status: external
+  notes: External Cloudflare deployment; local source backup only.
+history:
+- id: backup-caddy-20260704
+  service_id: caddy
+  target_id: caddy-restic
+  repository_id: restic-r2-main
+  tool: restic
+  completed_at: 2026-07-04T01:30:00Z
+  status: success
+  repository_snapshot_id: caddy-restic-snap-20260704
+  duration_seconds: 18
+  bytes_processed: 245760
+  limitations: []
+  notes: Example registered result from an external backup run.
+- id: backup-rankfan-new-20260704
+  service_id: rankfan-new
+  target_id: rankfan-new-restic
+  repository_id: restic-r2-main
+  tool: restic
+  completed_at: 2026-07-04T01:40:00Z
+  status: failed
+  duration_seconds: 31
+  limitations:
+  - Example failure record; latest successful backup must be confirmed before deploy.
+  notes: Demonstrates that failed latest history blocks the history summary.
+- id: backup-pcafev2-20260704
+  service_id: pcafev2
+  target_id: pcafev2-restic
+  repository_id: restic-r2-main
+  tool: restic
+  completed_at: 2026-07-04T01:50:00Z
+  status: success
+  repository_snapshot_id: pcafev2-restic-snap-20260704
+  duration_seconds: 42
+  bytes_processed: 1048576
+  limitations: []
+  notes: Example registered result from an external backup run.
+repository_checks:
+- id: check-restic-r2-main-20260704
+  repository_id: restic-r2-main
+  tool: restic
+  completed_at: 2026-07-04T02:10:00Z
+  status: success
+  duration_seconds: 73
+  limitations: []
+  notes: Example registered result from restic check.
+restore_drills:
+- id: restore-caddy-restic-20260704
+  service_id: caddy
+  target_id: caddy-restic
+  repository_id: restic-r2-main
+  tool: restic
+  completed_at: 2026-07-04T02:20:00Z
+  status: success
+  repository_snapshot_id: caddy-restic-snap-20260704
+  restore_dir: /var/lib/opsctl/restore-drills/caddy-20260704
+  files_checked: 3
+  bytes_checked: 4096
+  sampled_hashes: []
+  database_dump_checks: []
+  limitations: []
+  notes: Example successful staging restore drill.
+- id: restore-pcafev2-restic-20260704
+  service_id: pcafev2
+  target_id: pcafev2-restic
+  repository_id: restic-r2-main
+  tool: restic
+  completed_at: 2026-07-04T02:30:00Z
+  status: success
+  repository_snapshot_id: pcafev2-restic-snap-20260704
+  restore_dir: /var/lib/opsctl/restore-drills/pcafev2-20260704
+  files_checked: 12
+  bytes_checked: 1048576
+  sampled_hashes: []
+  database_dump_checks:
+  - dump_id: pcafe-postgres-dump
+    restored_path: /var/lib/opsctl/restore-drills/pcafev2-20260704/var/lib/opsctl/backup-dumps/pcafev2/postgres.sql
+    status: import_verified
+    detail: Example dump imported successfully into an isolated temporary container.
+  limitations: []
+  notes: Example successful staging restore drill.
+recovery_profiles: []

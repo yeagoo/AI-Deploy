@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily signed opsctl evidence checkpoint for key %i
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=45m
+Unit=opsctl-evidence-checkpoint@%i.service
+
+[Install]
+WantedBy=timers.target

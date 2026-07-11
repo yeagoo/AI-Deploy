@@ -1,0 +1,212 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://opsctl.local/schemas/plans.schema.yml
+title: opsctl deploy plan
+type: object
+additionalProperties: false
+required:
+  - id
+  - actor
+  - project_root
+  - intent
+  - environment
+  - changes
+properties:
+  id:
+    type: string
+    pattern: "^deploy_[a-z0-9][a-z0-9_-]*$"
+  actor:
+    type: string
+  service_id:
+    type: string
+    pattern: "^[a-z0-9][a-z0-9_-]*$"
+  project_root:
+    type: string
+  intent:
+    type: string
+    enum:
+      - deploy
+      - update
+      - rollback
+      - remove
+      - migrate
+      - inspect
+  environment:
+    type: string
+    enum:
+      - production
+      - staging
+      - development
+      - external
+      - unknown
+  changes:
+    type: object
+    additionalProperties: true
+    properties:
+      ports:
+        type: object
+      caddy:
+        type: object
+      docker:
+        type: object
+      static_site:
+        type: object
+        additionalProperties: false
+        properties:
+          sync:
+            type: array
+            items:
+              type: object
+              additionalProperties: false
+              required:
+                - source
+                - destination
+                - deployment_id
+              properties:
+                source:
+                  type: string
+                destination:
+                  type: string
+                deployment_id:
+                  type: string
+                  pattern: "^[A-Za-z0-9_-]{1,64}$"
+      health:
+        type: object
+        additionalProperties: false
+        properties:
+          enabled:
+            type: boolean
+          docker:
+            type: boolean
+          ports:
+            type: boolean
+          caddy:
+            type: boolean
+          static_site:
+            type: boolean
+      build:
+        type: object
+        additionalProperties: false
+        properties:
+          steps:
+            type: array
+            items:
+              type: object
+              additionalProperties: false
+              required:
+                - adapter
+              properties:
+                adapter:
+                  type: string
+                  enum:
+                    - npm
+                    - pnpm
+                    - bun
+                script:
+                  type: string
+                  pattern: "^[A-Za-z0-9:_-]{1,64}$"
+      laravel:
+        type: object
+        additionalProperties: false
+        properties:
+          optimize:
+            type: boolean
+          config_cache:
+            type: boolean
+          route_cache:
+            type: boolean
+          view_cache:
+            type: boolean
+      systemd:
+        type: object
+        additionalProperties: false
+        properties:
+          units:
+            type: array
+            items:
+              type: object
+              additionalProperties: false
+              required:
+                - unit
+                - action
+              properties:
+                unit:
+                  type: string
+                  pattern: "^[A-Za-z0-9_.@-]+\\.service$"
+                action:
+                  type: string
+                  enum:
+                    - reload
+                    - restart
+      files:
+        type: object
+        additionalProperties: false
+        properties:
+          write:
+            type: array
+            items:
+              type: string
+          typed:
+            type: array
+            items:
+              type: object
+              additionalProperties: false
+              required:
+                - path
+                - kind
+              properties:
+                path:
+                  type: string
+                kind:
+                  type: string
+                  enum:
+                    - caddy_route_snippet
+                params:
+                  type: object
+                  additionalProperties:
+                    type: string
+                mode:
+                  type: integer
+                  minimum: 384
+                  maximum: 511
+          delete:
+            type: array
+            items:
+              type: string
+      migrations:
+        type: object
+        additionalProperties: false
+        properties:
+          required:
+            type: boolean
+          command:
+            type: string
+      destructive_ops:
+        type: array
+        items:
+          type: string
+  preflight:
+    type: object
+    additionalProperties: false
+    properties:
+      status:
+        type: string
+        enum:
+          - pending
+          - passed
+          - needs_approval
+          - blocked
+      checked_at:
+        type: string
+        format: date-time
+      findings:
+        type: array
+        items:
+          type: object
+  approvals_required:
+    type: array
+    items:
+      type: string
+  snapshot_required:
+    type: boolean
+  notes:
+    type: string

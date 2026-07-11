@@ -1,0 +1,105 @@
+version: 1
+services:
+  - id: caddy
+    name: Caddy Server
+    root: /etc/caddy
+    kind: systemd
+    environment: production
+    deploy_method: systemd
+    owner: root
+    status: active
+    ports:
+      - 80
+      - 2019
+    domains: []
+    compose_projects: []
+    containers: []
+    volumes: []
+    data_paths:
+      - /etc/caddy
+    env_files: []
+    backup_policy: before_deploy
+    notes: Public reverse proxy and local admin API.
+
+  - id: rankfan-new
+    name: rankfan-new
+    root: /home/ivmm/rankfan-new
+    kind: laravel
+    environment: production
+    deploy_method: docker-compose
+    owner: ivmm
+    status: active
+    ports:
+      - 8080
+      - 33067
+      - 63790
+    domains: []
+    compose_projects:
+      - rankfan-new
+    containers:
+      - phprank-app
+      - phprank-db
+      - phprank-redis
+    volumes:
+      - phprank-mysql
+      - phprank-redis
+    data_paths: []
+    env_files:
+      - path: /home/ivmm/rankfan-new/.env
+        redaction: keys_only
+    backup_policy: before_deploy
+    notes: Example registration for a Laravel/Docker Compose service.
+
+  - id: pcafev2
+    name: P.Cafe v2
+    root: /home/ivmm/daohang/pcafev2
+    kind: nextjs
+    environment: production
+    deploy_method: node-and-compose-db
+    owner: ivmm
+    status: active
+    ports:
+      - 39800
+      - 55432
+    domains:
+      - p.cafe
+    compose_projects:
+      - pcafev2
+    containers:
+      - pcafe-db
+    volumes:
+      - pcafe-pg-data
+    data_paths: []
+    env_files:
+      - path: /home/ivmm/daohang/pcafev2/.env
+        redaction: keys_only
+    deployment:
+      build:
+        - adapter: npm
+          scripts:
+            - build
+            - start
+            - db:migrate
+      migrations:
+        - npm run db:migrate
+    backup_policy: before_deploy
+    notes: Example registration for a Next.js app using a local Postgres compose service.
+
+  - id: mariadb-edu-rich
+    name: MariaDB Education Site
+    root: /home/ivmm/seo-website/mariadb
+    kind: cloudflare-worker
+    environment: external
+    deploy_method: opennext-cloudflare
+    owner: ivmm
+    status: active
+    ports: []
+    domains:
+      - mariadb.edu.rich
+    compose_projects: []
+    containers: []
+    volumes: []
+    data_paths: []
+    env_files: []
+    backup_policy: external
+    notes: External deployment. It should still be registered even without local ports.

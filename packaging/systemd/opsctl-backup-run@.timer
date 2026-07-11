@@ -1,0 +1,12 @@
+[Unit]
+Description=Run opsctl controlled backup for %i daily
+
+[Timer]
+OnCalendar=daily
+RandomizedDelaySec=23h
+FixedRandomDelay=true
+AccuracySec=1m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

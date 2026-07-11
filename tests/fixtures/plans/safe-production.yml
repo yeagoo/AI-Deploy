@@ -1,0 +1,19 @@
+id: deploy_phase4_safe
+actor: tester
+project_root: /home/ivmm/tools/deploy-tools
+intent: deploy
+environment: production
+changes:
+  ports:
+    reserve:
+      - 39992
+  docker:
+    compose_project: phase4-safe
+    containers:
+      - phase4-safe-app
+    volumes:
+      - phase4-safe-data
+  destructive_ops: []
+snapshot_required: true
+preflight:
+  status: pending

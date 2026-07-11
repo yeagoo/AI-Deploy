@@ -1,0 +1,50 @@
+---
+title: 证据治理
+description: 用签名、审计链、归档恢复和 retention 证明操作记录可信。
+icon: FileKey
+---
+
+opsctl 将运行日志与可验证证据区分开来。审计链记录动作顺序；签名 checkpoint 绑定链头；归档演练证明证据在仓库中可以被恢复和重新验证。
+
+## 创建证据密钥
+
+```bash
+opsctl registry drift cleanup-request evidence-keygen \
+  --key-id <key-id> --execute --json
+```
+
+密钥不会自动生成或轮换。私钥必须由操作员控制，公钥需要登记信任有效期。
+
+## 签署与验证
+
+```bash
+opsctl registry drift cleanup-request audit-checkpoint \
+  --key-id <key-id> --execute --json
+
+opsctl registry drift cleanup-request evidence-verify-all --json
+```
+
+生产建议至少有两把独立可信密钥，并分别创建 checkpoint。撤销密钥不会删除历史公钥材料。
+
+## 归档演练
+
+证据归档的完整链路是：
+
+1. 签署 manifest。
+2. 导出 create-new audit bundle。
+3. 单独签署 bundle。
+4. 写入受控 Restic/rustic 仓库。
+5. 恢复到隔离目录，验证 bundle 与 detached signature。
+6. 删除 staging，并记录 drill 结果。
+
+## Retention attestation
+
+<Callout type="info" title="签名不等于不可变">
+  opsctl 可以验证 operator-signed retention attestation，但对象存储的 Object Lock/WORM 必须由外部系统真正实施并独立确认。
+</Callout>
+
+有效 attestation 需要：准确仓库、近期观察时间、未来 retain-until、Object Lock 已启用、独立验证，以及两个不同 reviewer。缺少任何条件都保持 blocked。
+
+## MCP 边界
+
+MCP 只提供只读查询与 dry-run 工具。签名、信任、归档写入和 retention import 不会通过 MCP 自动执行。

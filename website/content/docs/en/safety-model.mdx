@@ -1,0 +1,49 @@
+---
+title: Safety model
+description: Read-only defaults, explicit authority, serialized execution, and recoverable evidence.
+icon: ShieldCheck
+---
+
+The goal of opsctl is not to automate more operations. It is to give every operation a specific target, boundary, recovery path, and accountable human decision.
+
+## Read-only by default
+
+Most inspection commands only read the registry, state, and observed system facts. Mutating subcommands usually require explicit `--execute`, and expose the same-parameter plan first.
+
+```bash
+opsctl backup plan <service-id> --dry-run --json
+opsctl backup run <service-id> --json
+# Add --execute only after review.
+```
+
+## Three decisions
+
+| Status | Meaning | Next step |
+| --- | --- | --- |
+| `passed` | Current facts satisfy policy | Continue to the next controlled stage |
+| `needs_approval` | Risk is explainable but needs specific authority | Request scope-matching human approval |
+| `blocked` | Evidence is missing, conflicts exist, or the operation is forbidden | Fix the prerequisite; do not bypass it |
+
+## Approval is not a universal token
+
+Valid approval binds a plan, risk scope, approver, and expiry. “Approve everything” cannot satisfy execution gates. Execution recalculates current readiness so a stale preflight result cannot be reused.
+
+## Global serialization
+
+Every operation that mutates opsctl state or backup history shares one advisory lock:
+
+- Interactive commands fail fast so operators never mistake waiting for progress.
+- Reviewed systemd jobs may use bounded waiting.
+- Waiting has a hard cap, and the lock file is never deleted or replaced.
+
+## Destructive boundary
+
+<Callout type="error" title="Permanent boundary">
+  Cleanup workflows may collect evidence, create requests, and record manual handoff. They cannot approve themselves and cannot delete Docker volumes. MCP stays read-only.
+</Callout>
+
+## Credentials and logs
+
+- Restrict credential files; production commonly uses `root:opsctl` with mode `0600`.
+- JSON reports and audit logs expose variable names and sanitized failure classes, not values.
+- Temporary signature, archive, and restore paths use create-new semantics and reject symlink escape.

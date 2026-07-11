@@ -1,0 +1,14 @@
+# Example only. Do not install without reviewing paths and helper design.
+# Validate with:
+#   opsctl helper sudoers-check --path /etc/sudoers.d/opsctl-helper
+#
+# Intended model:
+# - AI tools call opsctl as an unprivileged user.
+# - opsctl verifies registry, preflight, snapshot, and approval gates.
+# - opsctl helper executes one typed deploy operation by order.
+# - sudoers allows only that helper, never arbitrary docker/caddy/systemctl.
+
+Cmnd_Alias OPSCTL_HELPER = /usr/bin/opsctl helper run-deploy-operation *, /usr/local/bin/opsctl helper run-deploy-operation *
+
+# Replace `opsctl` with the Unix user that runs Codex/Claude Code/opencode.
+opsctl ALL=(root) NOPASSWD: OPSCTL_HELPER

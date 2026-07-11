@@ -1,0 +1,44 @@
+---
+title: 发布与回滚
+description: 用同一个候选产物完成门禁、签名、升级演练和发布判断。
+icon: GitCompareArrows
+---
+
+正式发布要求源码身份、构建产物、测试结果、升级路径和 tag 指向同一个候选。
+
+## Release gate
+
+```bash
+OPSCTL_GATE_QUALITY=1 \
+OPSCTL_GATE_DEB_TEST=1 \
+OPSCTL_GATE_RELEASE=1 \
+scripts/release-gate.sh
+```
+
+门禁覆盖格式化、严格 Clippy、测试、失败矩阵、依赖审计、Debian 安装回归和 release manifest 验证。root-only Docker 主机可以显式把 sudo 仅限于一次性 Debian 容器测试。
+
+## 升级回滚演练
+
+补丁版本应使用明确的 previous package，验证：
+
+```text
+previous → candidate → previous → candidate → remove
+```
+
+演练必须证明 registry/state sentinel 保留、候选专属 unit 正确移除、reinstall 幂等，并且删除包不会删除稳定数据。
+
+## Go / No-Go
+
+Go 决策至少需要：
+
+- 真实 Git commit 与唯一版本。
+- release manifest 和 checksum 验证通过。
+- Critical/High review finding 已修复。
+- 备份、恢复和证据链满足发布策略。
+- 回滚包与恢复说明已保留。
+
+如果版本身份冲突、真实 Git 历史缺失或关键治理证据缺失，应发布 No-Go，而不是创建一个无法证明来源的 tag。
+
+## 回滚原则
+
+包回滚与数据恢复是两种不同动作。通常先回滚软件包并验证 `install-check`；只有独立确认数据完整性问题后，才考虑恢复 registry/state 快照。

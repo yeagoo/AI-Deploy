@@ -1,0 +1,232 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://opsctl.local/schemas/policies.schema.yml
+title: opsctl policies registry
+type: object
+additionalProperties: false
+required:
+  - version
+  - defaults
+  - protected_paths
+  - blocked_commands
+  - dangerous_operations
+  - redaction_patterns
+properties:
+  version:
+    type: integer
+    minimum: 1
+  defaults:
+    type: object
+    additionalProperties: false
+    required:
+      - production_requires_snapshot
+      - approval_expiry_minutes
+      - redact_env_values
+      - prefer_localhost_upstreams
+      - block_public_databases
+      - block_public_caches
+    properties:
+      production_requires_snapshot:
+        type: boolean
+      approval_expiry_minutes:
+        type: integer
+        minimum: 1
+        maximum: 10080
+      redact_env_values:
+        type: boolean
+      prefer_localhost_upstreams:
+        type: boolean
+      block_public_databases:
+        type: boolean
+      block_public_caches:
+        type: boolean
+  protected_paths:
+    type: array
+    items:
+      type: string
+      pattern: "^/"
+    uniqueItems: true
+  blocked_commands:
+    type: array
+    items:
+      type: string
+      minLength: 1
+    uniqueItems: true
+  dangerous_operations:
+    type: array
+    items:
+      type: string
+      enum:
+        - delete_file_tree
+        - overwrite_env_file
+        - overwrite_caddy_config
+        - remove_docker_volume
+        - recreate_production_container
+        - run_production_migration
+        - bind_database_publicly
+        - bind_cache_publicly
+    uniqueItems: true
+  redaction_patterns:
+    type: array
+    items:
+      type: string
+      minLength: 1
+    uniqueItems: true
+  drift_ignores:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - owner
+        - reason
+        - status
+      properties:
+        id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$"
+        code:
+          type: string
+          minLength: 1
+        kind:
+          type: string
+          enum:
+            - port
+            - caddy-domain
+            - docker-container
+            - compose-project
+            - docker-volume
+            - systemd-unit
+        target:
+          type: string
+          minLength: 1
+        target_prefix:
+          type: string
+          minLength: 1
+        target_suffix:
+          type: string
+          minLength: 1
+        target_contains:
+          type: string
+          minLength: 1
+        owner:
+          type: string
+          minLength: 1
+          maxLength: 128
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 512
+        expires_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+    uniqueItems: true
+  public_data_port_exceptions:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - port_id
+        - owner
+        - reason
+        - expires_at
+        - status
+      properties:
+        id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$"
+        port_id:
+          type: string
+          minLength: 1
+        owner:
+          type: string
+          minLength: 1
+          maxLength: 128
+        reason:
+          type: string
+          minLength: 1
+          maxLength: 512
+        expires_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+        mitigation:
+          type: string
+          minLength: 1
+          maxLength: 512
+    uniqueItems: true
+  timer_health:
+    type: object
+    additionalProperties: false
+    required:
+      - max_consecutive_failures
+      - block_deploy_on_failure
+      - journal_error_lines
+    properties:
+      max_consecutive_failures:
+        type: integer
+        minimum: 1
+        maximum: 30
+      block_deploy_on_failure:
+        type: boolean
+      journal_error_lines:
+        type: integer
+        minimum: 0
+        maximum: 100
+  timer_alerts:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - provider
+        - owner
+        - status
+      properties:
+        id:
+          type: string
+          pattern: "^[A-Za-z0-9][A-Za-z0-9_.@:-]{0,127}$"
+        provider:
+          type: string
+          enum:
+            - ntfy
+            - telegram
+            - email
+            - webhook
+        target_env:
+          type: string
+          pattern: "^[A-Z_][A-Z0-9_]{0,127}$"
+        topic:
+          type: string
+          minLength: 1
+          maxLength: 128
+        owner:
+          type: string
+          minLength: 1
+          maxLength: 128
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+        min_severity:
+          type: string
+          enum:
+            - warn
+            - error
+        notes:
+          type: string
+          maxLength: 512
+    uniqueItems: true

@@ -1,0 +1,50 @@
+---
+title: Evidence governance
+description: Use signatures, audit chains, archive recovery, and retention to prove operations records.
+icon: FileKey
+---
+
+opsctl distinguishes runtime logs from verifiable evidence. The audit chain orders actions, signed checkpoints bind its head, and archive drills prove evidence can be recovered and verified again.
+
+## Create an evidence key
+
+```bash
+opsctl registry drift cleanup-request evidence-keygen \
+  --key-id <key-id> --execute --json
+```
+
+Keys are never generated or rotated automatically. Operators control private material, while public keys receive explicit trust lifetimes.
+
+## Sign and verify
+
+```bash
+opsctl registry drift cleanup-request audit-checkpoint \
+  --key-id <key-id> --execute --json
+
+opsctl registry drift cleanup-request evidence-verify-all --json
+```
+
+Production should have at least two independent trusted keys and checkpoints from both. Revocation preserves historical public-key material.
+
+## Archive drill
+
+The complete evidence archive chain is:
+
+1. Sign a manifest.
+2. Export a create-new audit bundle.
+3. Sign the bundle separately.
+4. Write it to a controlled Restic/rustic repository.
+5. Restore into isolation and verify the bundle and detached signature.
+6. Remove staging and record the drill result.
+
+## Retention attestation
+
+<Callout type="info" title="A signature is not immutability">
+  opsctl can verify an operator-signed retention attestation, but an external object store must actually enforce and independently confirm Object Lock or WORM policy.
+</Callout>
+
+A valid attestation needs the exact repository, a fresh observation, future retain-until, enabled Object Lock, independent verification, and two distinct reviewers. Missing any condition remains blocked.
+
+## MCP boundary
+
+MCP exposes read-only reports and dry-run tools. Trust mutation, signing, archive writes, and retention import are not automatic MCP operations.

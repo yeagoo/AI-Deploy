@@ -1,0 +1,18 @@
+/.opsctl/
+/.opsctl-*/
+/target/
+
+# Local production/runtime evidence must never enter the public repository.
+/imports/
+/runtime/
+/release-evidence/
+/task_plan.md
+/findings.md
+/progress.md
+/docs/PHASE*_REVIEW.md
+/docs/PRODUCTION_*.md
+
+# Local credentials and environment overrides.
+.env
+.env.*
+!.env.example

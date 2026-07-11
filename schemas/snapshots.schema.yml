@@ -1,0 +1,72 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://opsctl.local/schemas/snapshots.schema.yml
+title: opsctl snapshots registry
+type: object
+additionalProperties: false
+required:
+  - version
+  - snapshots
+properties:
+  version:
+    type: integer
+    minimum: 1
+  snapshots:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - created_at
+        - status
+        - scope
+      properties:
+        id:
+          type: string
+          pattern: "^snap_[a-z0-9][a-z0-9_-]*$"
+        plan_id:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        service_ids:
+          type: array
+          items:
+            type: string
+        scope:
+          type: array
+          items:
+            type: string
+            enum:
+              - registry
+              - caddy
+              - docker_metadata
+              - compose_files
+              - database_dump
+              - volume_manifest
+              - volume_archive
+              - filesystem_manifest
+              - systemd
+        artifacts:
+          type: object
+          additionalProperties:
+            type: string
+        preflight_status:
+          type: string
+          enum:
+            - passed
+            - needs_approval
+            - blocked
+        status:
+          type: string
+          enum:
+            - pending
+            - complete
+            - partial
+            - failed
+        limitations:
+          type: array
+          items:
+            type: string
+        notes:
+          type: string

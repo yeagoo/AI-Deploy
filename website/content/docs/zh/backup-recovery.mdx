@@ -1,0 +1,62 @@
+---
+title: 备份与恢复
+description: 从备份计划到隔离恢复验证，证明数据真的可恢复。
+icon: ArchiveRestore
+---
+
+“备份命令成功”只说明数据被写入仓库。opsctl 将仓库检查、连续备份、恢复演练和内容验证拆成独立证据。
+
+## 配置仓库
+
+`backups.yml` 登记仓库 ID、provider、环境变量名和 retention 策略。凭据值不写入 registry。
+
+```yaml
+repositories:
+  - id: restic-main
+    provider: restic
+    repository_env: RESTIC_REPOSITORY
+    password_env: RESTIC_PASSWORD
+    env:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+    status: active
+```
+
+## 备份工作流
+
+```bash
+opsctl backup doctor --json
+opsctl backup plan <service-id> --dry-run --json
+opsctl backup check <repository-id> --json
+opsctl backup run <service-id> --json
+```
+
+审查计划后，只有最后两个命令在添加 `--execute` 时才执行受控 mutation。
+
+## 恢复演练
+
+```bash
+opsctl backup restore-plan <service-id> \
+  --repository-snapshot <snapshot-id> \
+  --restore-dir /var/lib/opsctl/restore-drills/<service-id>/run-review \
+  --json
+```
+
+恢复目录必须位于专用 staging root，不能覆盖生产路径。标准验证包括：
+
+- 文件数量与总字节数。
+- 有界哈希样本。
+- 已登记数据库 dump 的存在性或隔离导入结果。
+- 清理状态与限制项。
+
+## 恢复资格实验室
+
+`volume-protect lab-run` 用预加载、版本固定的数据库镜像测试 baseline、脏停机、缺失镜像、复制上限、资源下限和超时边界。
+
+<Callout type="warn" title="合成实验不等于业务恢复">
+  Recovery lab 证明恢复执行器和引擎兼容性；关键服务仍需要自己的快照、dump 导入和应用级验证。
+</Callout>
+
+## 定时任务
+
+启用 timer 前先通过仓库读写、连续备份和代表性恢复门禁。opsctl 使用全局串行锁与确定性时间分散，避免多个长任务同时争用仓库。

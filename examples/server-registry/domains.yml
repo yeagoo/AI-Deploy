@@ -1,0 +1,18 @@
+version: 1
+domains:
+  - id: pcafe-main
+    host: p.cafe
+    service_id: pcafev2
+    upstream: 127.0.0.1:39800
+    caddy_managed: true
+    tls: automatic
+    status: planned
+
+  - id: mariadb-edu-rich-main
+    host: mariadb.edu.rich
+    service_id: mariadb-edu-rich
+    upstream: cloudflare-workers
+    caddy_managed: false
+    tls: external
+    status: external
+

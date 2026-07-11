@@ -1,0 +1,196 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://opsctl.local/schemas/services.schema.yml
+title: opsctl services registry
+type: object
+additionalProperties: false
+required:
+  - version
+  - services
+properties:
+  version:
+    type: integer
+    minimum: 1
+  services:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - kind
+        - environment
+        - status
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        name:
+          type: string
+          minLength: 1
+        root:
+          type: string
+        kind:
+          type: string
+          enum:
+            - nextjs
+            - node
+            - static
+            - laravel
+            - php
+            - docker-compose
+            - dockerfile
+            - cloudflare-worker
+            - external
+            - systemd
+            - unknown
+        environment:
+          type: string
+          enum:
+            - production
+            - staging
+            - development
+            - external
+            - unknown
+        deploy_method:
+          type: string
+        owner:
+          type: string
+        status:
+          type: string
+          enum:
+            - active
+            - inactive
+            - planned
+            - retired
+            - unknown
+        ports:
+          type: array
+          items:
+            type: integer
+            minimum: 1
+            maximum: 65535
+        domains:
+          type: array
+          items:
+            type: string
+        compose_projects:
+          type: array
+          items:
+            type: string
+        containers:
+          type: array
+          items:
+            type: string
+        volumes:
+          type: array
+          items:
+            type: string
+        data_paths:
+          type: array
+          items:
+            type: string
+        env_files:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - path
+              - redaction
+            properties:
+              path:
+                type: string
+              redaction:
+                type: string
+                enum:
+                  - keys_only
+                  - none
+        deployment:
+          type: object
+          additionalProperties: false
+          properties:
+            build:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required:
+                  - adapter
+                properties:
+                  adapter:
+                    type: string
+                    enum:
+                      - npm
+                      - pnpm
+                      - bun
+                  scripts:
+                    type: array
+                    items:
+                      type: string
+                      pattern: "^[A-Za-z0-9:_-]{1,64}$"
+            laravel:
+              type: object
+              additionalProperties: false
+              properties:
+                optimize:
+                  type: boolean
+                config_cache:
+                  type: boolean
+                route_cache:
+                  type: boolean
+                view_cache:
+                  type: boolean
+            migrations:
+              type: array
+              items:
+                type: string
+                minLength: 1
+                maxLength: 256
+            systemd:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required:
+                  - unit
+                properties:
+                  unit:
+                    type: string
+                    pattern: "^[A-Za-z0-9_.@-]+\\.service$"
+                  actions:
+                    type: array
+                    items:
+                      type: string
+                      enum:
+                        - reload
+                        - restart
+            static_sites:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required:
+                  - source
+                  - destination
+                  - deployment_id
+                properties:
+                  source:
+                    type: string
+                  destination:
+                    type: string
+                  deployment_id:
+                    type: string
+                    pattern: "^[A-Za-z0-9_-]{1,64}$"
+            notes:
+              type: string
+        backup_policy:
+          type: string
+          enum:
+            - before_deploy
+            - daily
+            - external
+            - none
+            - unknown
+        notes:
+          type: string

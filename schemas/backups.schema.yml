@@ -1,0 +1,681 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://opsctl.local/schemas/backups.schema.yml
+title: opsctl backup registry
+type: object
+additionalProperties: false
+required:
+  - version
+  - repositories
+  - targets
+properties:
+  version:
+    type: integer
+    minimum: 1
+  repositories:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - provider
+        - status
+      anyOf:
+        - required:
+            - repository
+        - required:
+            - repository_env
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        provider:
+          type: string
+          enum:
+            - restic
+            - rustic
+            - borg
+            - bupstash
+            - kopia
+            - external
+        repository:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        repository_env:
+          type:
+            - string
+            - "null"
+          pattern: "^[A-Z_][A-Z0-9_]*$"
+        password_env:
+          type:
+            - string
+            - "null"
+          pattern: "^[A-Z_][A-Z0-9_]*$"
+        env:
+          type: array
+          items:
+            type: string
+            pattern: "^[A-Z_][A-Z0-9_]*$"
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+            - external
+            - unknown
+        retention:
+          type: object
+          additionalProperties: false
+          properties:
+            keep_daily:
+              type:
+                - integer
+                - "null"
+              minimum: 1
+            keep_weekly:
+              type:
+                - integer
+                - "null"
+              minimum: 1
+            keep_monthly:
+              type:
+                - integer
+                - "null"
+              minimum: 1
+            keep_yearly:
+              type:
+                - integer
+                - "null"
+              minimum: 1
+        check_after_backup:
+          type:
+            - boolean
+            - "null"
+        notes:
+          type:
+            - string
+            - "null"
+  targets:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - service_id
+        - repository_id
+        - include_paths
+        - schedule
+        - status
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        service_id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        repository_id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        max_age_hours:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        repository_check_max_age_hours:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        restore_drill_max_age_hours:
+          type:
+            - integer
+            - "null"
+          minimum: 1
+        include_paths:
+          type: array
+          minItems: 1
+          items:
+            type: string
+        exclude_paths:
+          type: array
+          items:
+            type: string
+        tags:
+          type: array
+          items:
+            type: string
+            pattern: "^[A-Za-z0-9_.:-]+$"
+        database_dumps:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - id
+              - kind
+              - output_path
+            properties:
+              id:
+                type: string
+                pattern: "^[a-z0-9][a-z0-9_-]*$"
+              kind:
+                type: string
+                enum:
+                  - mariadb
+                  - mysql
+                  - postgres
+                  - external
+              adapter:
+                type:
+                  - string
+                  - "null"
+                enum:
+                  - npm
+                  - pnpm
+                  - bun
+                  - null
+              script:
+                type:
+                  - string
+                  - "null"
+                pattern: "^[A-Za-z0-9:_-]{1,64}$"
+              working_dir:
+                type:
+                  - string
+                  - "null"
+              container:
+                type:
+                  - string
+                  - "null"
+              database:
+                type:
+                  - string
+                  - "null"
+              verify_kind:
+                type:
+                  - string
+                  - "null"
+                enum:
+                  - mariadb
+                  - mysql
+                  - postgres
+                  - null
+              restore_image:
+                type:
+                  - string
+                  - "null"
+                minLength: 1
+                maxLength: 256
+                pattern: "^[^[:space:]'\"]+$"
+              restore_postgres_settings:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 160
+                  pattern: "^[A-Za-z0-9_.=,-]+$"
+              output_path:
+                type: string
+              notes:
+                type:
+                  - string
+                  - "null"
+        schedule:
+          type: string
+          enum:
+            - before_deploy
+            - daily
+            - weekly
+            - manual
+            - external
+        status:
+          type: string
+          enum:
+            - active
+            - disabled
+            - external
+            - unknown
+        notes:
+          type:
+            - string
+            - "null"
+  history:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - service_id
+        - target_id
+        - tool
+        - completed_at
+        - status
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        service_id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        target_id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        repository_id:
+          type:
+            - string
+            - "null"
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        tool:
+          type: string
+          enum:
+            - restic
+            - rustic
+            - borg
+            - bupstash
+            - kopia
+            - external
+        completed_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum:
+            - success
+            - failed
+            - partial
+            - unknown
+        repository_snapshot_id:
+          type:
+            - string
+            - "null"
+          minLength: 1
+        duration_seconds:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        bytes_processed:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        limitations:
+          type: array
+          items:
+            type: string
+        notes:
+          type:
+            - string
+            - "null"
+  repository_checks:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - repository_id
+        - tool
+        - completed_at
+        - status
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        repository_id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        tool:
+          type: string
+          enum:
+            - restic
+            - rustic
+            - borg
+            - bupstash
+            - kopia
+            - external
+        completed_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum:
+            - success
+            - failed
+            - partial
+            - unknown
+        duration_seconds:
+          type:
+            - integer
+            - "null"
+          minimum: 0
+        limitations:
+          type: array
+          items:
+            type: string
+        notes:
+          type:
+            - string
+            - "null"
+  restore_drills:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - service_id
+        - target_id
+        - repository_id
+        - tool
+        - completed_at
+        - status
+        - repository_snapshot_id
+        - restore_dir
+        - files_checked
+        - bytes_checked
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        service_id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        target_id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        repository_id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        tool:
+          type: string
+          enum:
+            - restic
+            - rustic
+            - borg
+            - bupstash
+            - kopia
+            - external
+        completed_at:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum:
+            - success
+            - failed
+            - partial
+            - unknown
+        repository_snapshot_id:
+          type: string
+          minLength: 1
+        restore_dir:
+          type: string
+        files_checked:
+          type: integer
+          minimum: 0
+        bytes_checked:
+          type: integer
+          minimum: 0
+        sampled_hashes:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - path
+              - sha256
+              - bytes
+            properties:
+              path:
+                type: string
+              sha256:
+                type: string
+                pattern: "^[a-f0-9]{64}$"
+              bytes:
+                type: integer
+                minimum: 0
+        database_dump_checks:
+          type: array
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - dump_id
+              - restored_path
+              - status
+              - detail
+            properties:
+              dump_id:
+                type: string
+                pattern: "^[a-z0-9][a-z0-9_-]*$"
+              restored_path:
+                type: string
+              status:
+                type: string
+                enum:
+                  - plausible_sql
+                  - present_compressed
+                  - import_verified
+                  - import_failed
+                  - missing
+                  - unrecognized
+              detail:
+                type: string
+        limitations:
+          type: array
+          items:
+            type: string
+        notes:
+          type:
+            - string
+            - "null"
+  recovery_profiles:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - volume
+        - engine
+        - image
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        volume:
+          type: string
+          minLength: 1
+          maxLength: 255
+        engine:
+          type: string
+          enum:
+            - postgres
+            - mysql
+            - mariadb
+            - redis
+            - minio
+        image:
+          type: string
+          minLength: 3
+          maxLength: 256
+          pattern: "^[A-Za-z0-9./_:@-]+$"
+        engine_version:
+          type:
+            - string
+            - "null"
+          minLength: 1
+          maxLength: 64
+          pattern: "^[A-Za-z0-9._-]+$"
+        data_subpath:
+          type:
+            - string
+            - "null"
+          maxLength: 512
+        timeout_seconds:
+          type: integer
+          minimum: 10
+          maximum: 900
+        memory_mb:
+          type: integer
+          minimum: 128
+          maximum: 16384
+        cpus:
+          type: number
+          minimum: 0.1
+          maximum: 8
+        pids_limit:
+          type: integer
+          minimum: 32
+          maximum: 4096
+        copy_limit_bytes:
+          type: integer
+          minimum: 1048576
+          maximum: 1099511627776
+        env:
+          type: array
+          maxItems: 32
+          items:
+            type: string
+            pattern: "^[A-Z_][A-Z0-9_]*$"
+        recovery_probes:
+          type: array
+          maxItems: 32
+          items:
+            type: object
+            additionalProperties: false
+            required:
+              - id
+              - kind
+            properties:
+              id:
+                type: string
+                pattern: "^[a-z0-9][a-z0-9_-]*$"
+              kind:
+                type: string
+                enum:
+                  - file_count
+                  - sha256
+                  - sql_readonly
+                  - redis_key_count
+                  - minio_object_count
+              path:
+                type:
+                  - string
+                  - "null"
+                maxLength: 512
+              query:
+                type:
+                  - string
+                  - "null"
+                minLength: 1
+                maxLength: 512
+              database:
+                type:
+                  - string
+                  - "null"
+                pattern: "^[A-Za-z0-9_$.-]{1,128}$"
+              username:
+                type:
+                  - string
+                  - "null"
+                pattern: "^[A-Za-z0-9_$.-]{1,128}$"
+              expected_min:
+                type:
+                  - integer
+                  - "null"
+                minimum: 0
+              expected_sha256:
+                type:
+                  - string
+                  - "null"
+                pattern: "^[a-f0-9]{64}$"
+        application:
+          type:
+            - object
+            - "null"
+          additionalProperties: false
+          required:
+            - image
+            - internal_port
+            - health_path
+          properties:
+            image:
+              type: string
+              minLength: 3
+              maxLength: 256
+              pattern: "^[A-Za-z0-9./_:@-]+$"
+            internal_port:
+              type: integer
+              minimum: 1
+              maximum: 65535
+            health_path:
+              type: string
+              minLength: 1
+              maxLength: 256
+              pattern: "^/[A-Za-z0-9/_?&=.-]*$"
+            env:
+              type: array
+              maxItems: 64
+              items:
+                type: string
+                pattern: "^[A-Z_][A-Z0-9_]*$"
+            database_host_env:
+              type:
+                - string
+                - "null"
+              pattern: "^[A-Z_][A-Z0-9_]*$"
+            database_port_env:
+              type:
+                - string
+                - "null"
+              pattern: "^[A-Z_][A-Z0-9_]*$"
+            timeout_seconds:
+              type: integer
+              minimum: 10
+              maximum: 900
+            memory_mb:
+              type: integer
+              minimum: 128
+              maximum: 16384
+            cpus:
+              type: number
+              minimum: 0.1
+              maximum: 8
+            pids_limit:
+              type: integer
+              minimum: 32
+              maximum: 4096
+            probes:
+              type: array
+              maxItems: 32
+              items:
+                type: object
+                additionalProperties: false
+                required:
+                  - id
+                  - path
+                properties:
+                  id:
+                    type: string
+                    pattern: "^[a-z0-9][a-z0-9_-]*$"
+                  path:
+                    type: string
+                    minLength: 1
+                    maxLength: 256
+                    pattern: "^/[A-Za-z0-9/_?&=.-]*$"
+                  expected_contains:
+                    type:
+                      - string
+                      - "null"
+                    minLength: 1
+                    maxLength: 128
+        notes:
+          type:
+            - string
+            - "null"

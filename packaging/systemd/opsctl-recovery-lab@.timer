@@ -1,0 +1,11 @@
+[Unit]
+Description=Weekly opsctl recovery qualification lab for profile %i
+
+[Timer]
+OnCalendar=weekly
+Persistent=true
+RandomizedDelaySec=2h
+Unit=opsctl-recovery-lab@%i.service
+
+[Install]
+WantedBy=timers.target

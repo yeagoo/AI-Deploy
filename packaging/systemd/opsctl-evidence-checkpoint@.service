@@ -1,0 +1,15 @@
+[Unit]
+Description=Create signed opsctl evidence checkpoint for key %i
+
+[Service]
+Type=oneshot
+Environment=OPSCTL_LOCK_WAIT_SECONDS=1800
+User=opsctl
+Group=opsctl
+ExecStart=/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry drift cleanup-request audit-checkpoint --key-id %i --execute
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opsctl
+TimeoutStartSec=45m
+UMask=0077

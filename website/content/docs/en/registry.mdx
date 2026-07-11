@@ -1,0 +1,61 @@
+---
+title: Registry
+description: Describe the desired state of a single-server production environment in strict YAML.
+icon: Database
+---
+
+The registry is the declarative source of truth. SQLite is local state and indexing only; services, ports, domains, volumes, snapshots, and backup policy remain YAML-owned.
+
+## Default structure
+
+```text
+/srv/server-registry/
+├── services.yml
+├── ports.yml
+├── domains.yml
+├── volumes.yml
+├── snapshots.yml
+├── backups.yml
+├── policies.yml
+├── approvals/
+├── plans/
+└── history/
+```
+
+## Validate the registry
+
+```bash
+opsctl registry validate --json
+opsctl doctor --json
+```
+
+`registry validate` checks schemas and references. `doctor` adds policy analysis for port conflicts, production snapshot coverage, public database ports, and other operational risks.
+
+## Service declarations
+
+A service record should make these facts explicit:
+
+- Stable ID and environment.
+- Deployment kind, such as systemd, Compose, or static files.
+- Project path and health checks.
+- Ownership of ports, domains, and volumes.
+- Whether a `before_deploy` backup gate applies.
+
+## Start from observations
+
+```bash
+opsctl scan --json
+opsctl registry drift list --json
+opsctl registry drift explain <drift-id> --json
+```
+
+Observed state is not automatically source of truth. You may adopt clearly owned resources or record expiring ignores for accepted drift; both should leave audit evidence.
+
+## Change discipline
+
+1. Generate or review a draft.
+2. Run strict validation.
+3. Confirm the diff contains only the intended resources.
+4. Retain a snapshot and rollback plan for production mutations.
+
+Never promote an entire scan into production truth. Unknown ownership, shared volumes, and public ports require human judgment.

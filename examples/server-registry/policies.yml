@@ -1,0 +1,67 @@
+version: 1
+defaults:
+  production_requires_snapshot: true
+  approval_expiry_minutes: 60
+  redact_env_values: true
+  prefer_localhost_upstreams: true
+  block_public_databases: true
+  block_public_caches: true
+protected_paths:
+  - /srv
+  - /etc/caddy
+  - /var/lib/docker
+  - /var/lib/opsctl
+  - /var/backups
+blocked_commands:
+  - rm -rf
+  - docker compose down -v
+  - docker volume rm
+  - docker system prune
+dangerous_operations:
+  - delete_file_tree
+  - overwrite_env_file
+  - overwrite_caddy_config
+  - remove_docker_volume
+  - recreate_production_container
+  - run_production_migration
+  - bind_database_publicly
+  - bind_cache_publicly
+redaction_patterns:
+  - "*_SECRET"
+  - "*_TOKEN"
+  - "*_KEY"
+  - PASSWORD
+  - DATABASE_URL
+  - REDIS_URL
+  - VALKEY_URL
+  - POSTGRES_URL
+  - "MYSQL_*"
+  - R2_SECRET_ACCESS_KEY
+drift_ignores: []
+public_data_port_exceptions:
+  - id: rankfan-mysql-public-example
+    port_id: rankfan-mysql
+    owner: opsctl-example
+    reason: Example registry intentionally demonstrates an approved temporary public database exception.
+    expires_at: "2099-01-01T00:00:00Z"
+    status: active
+    mitigation: Bind real production databases to localhost or private networks whenever possible.
+  - id: rankfan-redis-public-example
+    port_id: rankfan-redis
+    owner: opsctl-example
+    reason: Example registry intentionally demonstrates an approved temporary public cache exception.
+    expires_at: "2099-01-01T00:00:00Z"
+    status: active
+    mitigation: Bind real production caches to localhost or private networks whenever possible.
+  - id: pcafe-postgres-public-example
+    port_id: pcafe-postgres
+    owner: opsctl-example
+    reason: Example registry intentionally demonstrates an approved temporary public database exception.
+    expires_at: "2099-01-01T00:00:00Z"
+    status: active
+    mitigation: Bind real production databases to localhost or private networks whenever possible.
+timer_health:
+  max_consecutive_failures: 2
+  block_deploy_on_failure: true
+  journal_error_lines: 20
+timer_alerts: []

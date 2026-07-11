@@ -1,0 +1,11 @@
+[Unit]
+Description=Resume bounded opsctl volume protection campaign %i hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10m
+Persistent=true
+Unit=opsctl-volume-protect-campaign@%i.service
+
+[Install]
+WantedBy=timers.target

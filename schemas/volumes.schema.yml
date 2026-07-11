@@ -1,0 +1,61 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://opsctl.local/schemas/volumes.schema.yml
+title: opsctl volumes registry
+type: object
+additionalProperties: false
+required:
+  - version
+  - volumes
+properties:
+  version:
+    type: integer
+    minimum: 1
+  volumes:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - name
+        - service_id
+        - kind
+        - protected
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        name:
+          type: string
+          minLength: 1
+        service_id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        kind:
+          type: string
+          enum:
+            - docker_volume
+            - bind_mount
+            - database
+            - upload_dir
+            - backup_dir
+            - unknown
+        mountpoint:
+          type: string
+        contains:
+          type: array
+          items:
+            type: string
+        backup_policy:
+          type: string
+          enum:
+            - before_deploy
+            - daily
+            - external
+            - none
+            - unknown
+        protected:
+          type: boolean
+        notes:
+          type: string
+

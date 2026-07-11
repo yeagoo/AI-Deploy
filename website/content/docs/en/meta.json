@@ -1,0 +1,15 @@
+{
+  "title": "opsctl Documentation",
+  "pages": [
+    "index",
+    "getting-started",
+    "safety-model",
+    "---Core workflows---",
+    "registry",
+    "backup-recovery",
+    "evidence-governance",
+    "---Operations reference---",
+    "release-operations",
+    "cli-reference"
+  ]
+}

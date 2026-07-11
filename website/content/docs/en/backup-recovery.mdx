@@ -1,0 +1,62 @@
+---
+title: Backup and recovery
+description: Prove that data can be recovered, from backup plan through isolated restore verification.
+icon: ArchiveRestore
+---
+
+A successful backup command proves only that data was written. opsctl treats repository health, consecutive backups, restore drills, and content verification as separate evidence.
+
+## Register a repository
+
+`backups.yml` records repository ID, provider, environment variable names, and retention. Credential values never belong in the registry.
+
+```yaml
+repositories:
+  - id: restic-main
+    provider: restic
+    repository_env: RESTIC_REPOSITORY
+    password_env: RESTIC_PASSWORD
+    env:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+    status: active
+```
+
+## Backup workflow
+
+```bash
+opsctl backup doctor --json
+opsctl backup plan <service-id> --dry-run --json
+opsctl backup check <repository-id> --json
+opsctl backup run <service-id> --json
+```
+
+After reviewing the plan, the last two commands execute controlled mutation only when `--execute` is added.
+
+## Restore drill
+
+```bash
+opsctl backup restore-plan <service-id> \
+  --repository-snapshot <snapshot-id> \
+  --restore-dir /var/lib/opsctl/restore-drills/<service-id>/run-review \
+  --json
+```
+
+The restore directory must be inside a dedicated staging root and must not overlap production. Standard verification covers:
+
+- File count and total bytes.
+- Bounded hash samples.
+- Presence or isolated import status for registered database dumps.
+- Cleanup status and explicit limitations.
+
+## Recovery qualification lab
+
+`volume-protect lab-run` tests baseline, dirty shutdown, missing image, copy limit, resource floor, and timeout boundary using preloaded, version-pinned database images.
+
+<Callout type="warn" title="Synthetic qualification is not business recovery">
+  The lab proves executor and engine compatibility. Critical services still need their own snapshots, dump imports, and application-level verification.
+</Callout>
+
+## Scheduling
+
+Before enabling timers, pass repository read/write, consecutive backup, and representative restore gates. opsctl uses global serialization and deterministic schedule spreading to prevent long jobs from colliding.

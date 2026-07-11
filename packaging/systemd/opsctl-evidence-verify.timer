@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily opsctl evidence verification
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+Unit=opsctl-evidence-verify.service
+
+[Install]
+WantedBy=timers.target

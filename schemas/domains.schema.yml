@@ -1,0 +1,55 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://opsctl.local/schemas/domains.schema.yml
+title: opsctl domains registry
+type: object
+additionalProperties: false
+required:
+  - version
+  - domains
+properties:
+  version:
+    type: integer
+    minimum: 1
+  domains:
+    type: array
+    items:
+      type: object
+      additionalProperties: false
+      required:
+        - id
+        - host
+        - service_id
+        - status
+      properties:
+        id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        host:
+          type: string
+          minLength: 1
+        service_id:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9_-]*$"
+        upstream:
+          type: string
+        caddy_managed:
+          type: boolean
+        tls:
+          type: string
+          enum:
+            - automatic
+            - manual
+            - external
+            - none
+            - unknown
+        status:
+          type: string
+          enum:
+            - active
+            - planned
+            - disabled
+            - external
+            - unknown
+        notes:
+          type: string
+

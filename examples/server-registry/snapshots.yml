@@ -1,0 +1,22 @@
+version: 1
+snapshots:
+- id: snap_example_pcafev2_before_deploy
+  plan_id: deploy_example_pcafev2
+  created_at: 2026-07-04T01:50:00+08:00
+  service_ids:
+  - pcafev2
+  scope:
+  - registry
+  - caddy
+  - docker_metadata
+  - compose_files
+  - database_dump
+  - volume_manifest
+  artifacts:
+    caddy_config: /var/lib/opsctl/snapshots/snap_example_pcafev2_before_deploy/Caddyfile
+    docker_state: /var/lib/opsctl/snapshots/snap_example_pcafev2_before_deploy/docker-state.json
+    registry_archive: /var/lib/opsctl/snapshots/snap_example_pcafev2_before_deploy/registry.tar.zst
+    rollback_plan: /var/lib/opsctl/snapshots/snap_example_pcafev2_before_deploy/rollback.yml
+  status: complete
+  limitations:
+  - Example record only. Not a real backup artifact.

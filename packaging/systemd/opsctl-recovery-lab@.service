@@ -1,0 +1,15 @@
+[Unit]
+Description=Run opsctl recovery qualification lab for profile %i
+
+[Service]
+Type=oneshot
+Environment=OPSCTL_LOCK_WAIT_SECONDS=21600
+User=opsctl
+Group=opsctl
+ExecStart=/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl backup volume-protect lab-run --fixture-root /var/lib/opsctl/recovery-lab-fixtures --profile-id %i --execute
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opsctl
+TimeoutStartSec=12h
+UMask=0077

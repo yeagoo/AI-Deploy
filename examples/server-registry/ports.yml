@@ -1,0 +1,68 @@
+version: 1
+ports:
+  - id: caddy-http
+    port: 80
+    protocol: tcp
+    bind: 0.0.0.0
+    service_id: caddy
+    purpose: public HTTP entry
+    exposure: public
+    source: registered
+
+  - id: caddy-admin
+    port: 2019
+    protocol: tcp
+    bind: 127.0.0.1
+    service_id: caddy
+    purpose: Caddy admin API
+    exposure: localhost
+    source: registered
+
+  - id: rankfan-web
+    port: 8080
+    protocol: tcp
+    bind: 0.0.0.0
+    service_id: rankfan-new
+    purpose: Laravel web container
+    exposure: public
+    source: registered
+
+  - id: rankfan-mysql
+    port: 33067
+    protocol: tcp
+    bind: 0.0.0.0
+    service_id: rankfan-new
+    purpose: MySQL container mapping
+    exposure: public
+    source: registered
+    notes: Policy should flag public database exposure unless explicitly approved.
+
+  - id: rankfan-redis
+    port: 63790
+    protocol: tcp
+    bind: 0.0.0.0
+    service_id: rankfan-new
+    purpose: Redis container mapping
+    exposure: public
+    source: registered
+    notes: Policy should flag public cache exposure unless explicitly approved.
+
+  - id: pcafe-web
+    port: 39800
+    protocol: tcp
+    bind: 127.0.0.1
+    service_id: pcafev2
+    purpose: Next.js upstream
+    exposure: localhost
+    source: reserved
+
+  - id: pcafe-postgres
+    port: 55432
+    protocol: tcp
+    bind: 0.0.0.0
+    service_id: pcafev2
+    purpose: Postgres container mapping
+    exposure: public
+    source: registered
+    notes: Policy should recommend binding to 127.0.0.1.
+

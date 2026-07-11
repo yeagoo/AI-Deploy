@@ -1,0 +1,15 @@
+{
+  "title": "opsctl 文档",
+  "pages": [
+    "index",
+    "getting-started",
+    "safety-model",
+    "---核心工作流---",
+    "registry",
+    "backup-recovery",
+    "evidence-governance",
+    "---运维参考---",
+    "release-operations",
+    "cli-reference"
+  ]
+}

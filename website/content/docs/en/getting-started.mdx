@@ -1,0 +1,66 @@
+---
+title: Get started
+description: Build, install, and complete the first read-only verification.
+icon: Rocket
+---
+
+## Prerequisites
+
+- A Linux server with systemd; Docker when container workflows are used.
+- A stable Rust toolchain, or a prebuilt Debian package.
+- Registry and state directories; production defaults are `/srv/server-registry` and `/var/lib/opsctl`.
+- Separately managed Restic/rustic credentials when executing backups.
+
+<Callout type="warn" title="Do not copy production credentials">
+  This documentation shows environment variable names only. Store real values in root-only files or controlled systemd credentials, and never commit them to source.
+</Callout>
+
+## Build from source
+
+```bash
+cargo build --release
+./target/release/opsctl --version
+```
+
+Install on Debian:
+
+```bash
+sudo scripts/install-debian.sh ./target/release/opsctl
+```
+
+The installer creates the runtime user, registry/state directories, and systemd unit files. It does not automatically enable backup or governance timers.
+
+## First verification
+
+```bash
+sudo opsctl \
+  --registry /srv/server-registry \
+  --state-dir /var/lib/opsctl \
+  install-check --json
+```
+
+Then validate the registry:
+
+```bash
+sudo opsctl \
+  --registry /srv/server-registry \
+  --state-dir /var/lib/opsctl \
+  registry validate --json
+```
+
+## Run read-only checks
+
+```bash
+opsctl status --json
+opsctl doctor --json
+opsctl scan --json
+opsctl deploy-gates --json
+```
+
+These commands read state and return structured reports. They do not deploy anything.
+
+## Recommended next steps
+
+1. Read [Registry](./registry) and describe the real services as source-of-truth records.
+2. Read the [Safety model](./safety-model) to understand dry-run, approval, and global locking.
+3. Configure [Backup and recovery](./backup-recovery) before any production change.

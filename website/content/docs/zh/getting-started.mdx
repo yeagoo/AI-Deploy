@@ -1,0 +1,66 @@
+---
+title: 快速开始
+description: 构建、安装并完成第一次只读验证。
+icon: Rocket
+---
+
+## 前置条件
+
+- Linux 服务器，具备 systemd；涉及容器时需要 Docker。
+- Rust stable 工具链，或已经构建好的 Debian 包。
+- registry 目录与 state 目录；生产默认分别为 `/srv/server-registry` 和 `/var/lib/opsctl`。
+- 执行备份时需要单独配置 Restic/rustic 仓库凭据。
+
+<Callout type="warn" title="不要复制生产凭据">
+  文档中的环境变量只展示名称。真实值应保存在 root-only 文件或受控的 systemd credential 中，绝不能提交到源码。
+</Callout>
+
+## 从源码构建
+
+```bash
+cargo build --release
+./target/release/opsctl --version
+```
+
+安装到 Debian 系统：
+
+```bash
+sudo scripts/install-debian.sh ./target/release/opsctl
+```
+
+安装脚本创建运行用户、registry/state 目录和 systemd unit 文件，但不会自动启用治理或备份定时器。
+
+## 第一次验证
+
+```bash
+sudo opsctl \
+  --registry /srv/server-registry \
+  --state-dir /var/lib/opsctl \
+  install-check --json
+```
+
+然后验证 registry：
+
+```bash
+sudo opsctl \
+  --registry /srv/server-registry \
+  --state-dir /var/lib/opsctl \
+  registry validate --json
+```
+
+## 运行只读检查
+
+```bash
+opsctl status --json
+opsctl doctor --json
+opsctl scan --json
+opsctl deploy-gates --json
+```
+
+这些命令读取状态并输出结构化结果，不执行部署。
+
+## 推荐的下一步
+
+1. 阅读 [Registry](./registry)，把实际服务登记为事实源。
+2. 阅读 [安全模型](./safety-model)，理解 `dry-run`、审批和全局锁。
+3. 配置 [备份与恢复](./backup-recovery)，在任何生产变更前证明恢复路径。

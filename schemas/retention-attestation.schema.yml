@@ -1,0 +1,58 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://opsctl.local/schemas/retention-attestation.schema.yml
+title: opsctl external retention attestation
+type: object
+additionalProperties: false
+required:
+  - schema_version
+  - attestation_id
+  - observed_at
+  - repository_id
+  - provider
+  - location
+  - object_lock_enabled
+  - retention_mode
+  - retain_until
+  - independently_verified
+  - reviewers
+  - source
+properties:
+  schema_version:
+    const: opsctl.retention_attestation.v1
+  attestation_id:
+    type: string
+    pattern: '^[a-z0-9][a-z0-9_-]{0,63}$'
+  observed_at:
+    type: string
+    format: date-time
+  repository_id:
+    type: string
+    pattern: '^[a-z0-9][a-z0-9_-]{0,63}$'
+  provider:
+    type: string
+    minLength: 1
+    maxLength: 512
+  location:
+    type: string
+    minLength: 1
+    maxLength: 512
+  object_lock_enabled:
+    const: true
+  retention_mode:
+    enum: [governance, compliance]
+  retain_until:
+    type: string
+    format: date-time
+  independently_verified:
+    const: true
+  reviewers:
+    type: array
+    minItems: 2
+    uniqueItems: true
+    items:
+      type: string
+      pattern: '^[a-z0-9][a-z0-9_-]{0,63}$'
+  source:
+    type: string
+    minLength: 1
+    maxLength: 512

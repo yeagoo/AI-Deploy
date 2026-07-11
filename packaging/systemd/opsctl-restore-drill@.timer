@@ -1,0 +1,12 @@
+[Unit]
+Description=Run opsctl restore drill for %i weekly
+
+[Timer]
+OnCalendar=Sun *-*-* 00:00:00
+RandomizedDelaySec=23h
+FixedRandomDelay=true
+AccuracySec=1m
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,17 @@
+[Unit]
+Description=opsctl scheduled restore drill for %i
+Documentation=file:/usr/share/doc/opsctl/DEBIAN_INSTALL.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=OPSCTL_LOCK_WAIT_SECONDS=21600
+EnvironmentFile=-/etc/opsctl/backup.env
+EnvironmentFile=-/etc/opsctl/restic.env
+ExecStartPre=/usr/bin/install -d -m 0700 /var/lib/opsctl/restore-drills/%i
+ExecStart=/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl backup drill %i --restore-dir /var/lib/opsctl/restore-drills/%i --execute --scheduled
+TimeoutStartSec=12h
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

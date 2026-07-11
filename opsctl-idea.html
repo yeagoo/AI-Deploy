@@ -1,0 +1,982 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>服务器部署护栏：一个轻量的 AI 部署安全方案</title>
+    <meta
+      name="description"
+      content="一个不做控制面板、不接管服务器、专门帮助 AI 工具安全部署项目的轻量方案。"
+    />
+    <style>
+      :root {
+        color-scheme: light;
+        --ink: #171a18;
+        --muted: #5d6761;
+        --line: #d7ded8;
+        --paper: #f6f8f6;
+        --panel: #ffffff;
+        --soft: #e9eee9;
+        --green: #1f8a5b;
+        --blue: #3976a6;
+        --amber: #c7831d;
+        --red: #c83e34;
+        --shadow: 0 18px 55px rgba(23, 26, 24, 0.09);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html {
+        scroll-behavior: smooth;
+      }
+
+      body {
+        margin: 0;
+        background:
+          linear-gradient(90deg, rgba(23, 26, 24, 0.04) 1px, transparent 1px),
+          linear-gradient(rgba(23, 26, 24, 0.035) 1px, transparent 1px),
+          var(--paper);
+        background-size: 44px 44px;
+        color: var(--ink);
+        font-family:
+          "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC",
+          "Microsoft YaHei", sans-serif;
+        line-height: 1.65;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .page {
+        min-height: 100vh;
+      }
+
+      .wrap {
+        width: min(1120px, calc(100% - 36px));
+        margin: 0 auto;
+      }
+
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 20;
+        border-bottom: 1px solid rgba(23, 26, 24, 0.1);
+        background: rgba(246, 248, 246, 0.92);
+        backdrop-filter: blur(16px);
+      }
+
+      .topbar-inner {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 68px;
+        gap: 20px;
+      }
+
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        font-weight: 800;
+      }
+
+      .brand-mark {
+        display: grid;
+        place-items: center;
+        width: 36px;
+        height: 36px;
+        border: 1px solid var(--ink);
+        background: var(--ink);
+        color: #fff;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 19px;
+      }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .nav a {
+        padding: 8px 10px;
+        text-decoration: none;
+      }
+
+      .nav a:hover {
+        color: var(--ink);
+        background: var(--soft);
+      }
+
+      .hero {
+        padding: 82px 0 46px;
+      }
+
+      .hero-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 1.05fr) minmax(360px, 0.95fr);
+        gap: 46px;
+        align-items: center;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 10px;
+        margin: 0 0 18px;
+        color: var(--green);
+        font-size: 14px;
+        font-weight: 800;
+      }
+
+      .eyebrow::before {
+        content: "";
+        width: 34px;
+        height: 2px;
+        background: var(--green);
+      }
+
+      h1,
+      h2,
+      h3 {
+        margin: 0;
+        line-height: 1.12;
+        font-family:
+          "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", Georgia,
+          serif;
+      }
+
+      h1 {
+        max-width: 760px;
+        font-size: clamp(42px, 7vw, 82px);
+        font-weight: 900;
+      }
+
+      h2 {
+        font-size: clamp(30px, 4vw, 48px);
+        font-weight: 900;
+      }
+
+      h3 {
+        font-size: 22px;
+        font-weight: 900;
+      }
+
+      .hero-copy {
+        max-width: 680px;
+        margin: 24px 0 0;
+        color: #38413c;
+        font-size: 19px;
+      }
+
+      .hero-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 32px;
+      }
+
+      .button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 46px;
+        padding: 0 18px;
+        border: 1px solid var(--ink);
+        background: var(--ink);
+        color: #fff;
+        font-weight: 800;
+        text-decoration: none;
+      }
+
+      .button.secondary {
+        background: transparent;
+        color: var(--ink);
+      }
+
+      .button:hover {
+        transform: translateY(-1px);
+      }
+
+      .hero-panel {
+        position: relative;
+        border: 1px solid var(--ink);
+        background: var(--panel);
+        box-shadow: var(--shadow);
+        overflow: hidden;
+      }
+
+      .hero-panel::before {
+        content: "";
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        background:
+          linear-gradient(135deg, rgba(31, 138, 91, 0.12), transparent 36%),
+          linear-gradient(315deg, rgba(57, 118, 166, 0.1), transparent 32%);
+      }
+
+      .panel-header {
+        position: relative;
+        display: flex;
+        justify-content: space-between;
+        gap: 16px;
+        padding: 18px 18px 14px;
+        border-bottom: 1px solid var(--line);
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      .panel-body {
+        position: relative;
+        padding: 22px;
+      }
+
+      .flow {
+        display: grid;
+        gap: 12px;
+      }
+
+      .flow-row {
+        display: grid;
+        grid-template-columns: 78px minmax(0, 1fr);
+        gap: 12px;
+        align-items: stretch;
+      }
+
+      .flow-label {
+        display: grid;
+        place-items: center;
+        border: 1px solid var(--line);
+        background: #f8faf8;
+        color: var(--muted);
+        font-size: 12px;
+        font-weight: 900;
+      }
+
+      .flow-box {
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.82);
+        padding: 14px;
+      }
+
+      .flow-box strong {
+        display: block;
+        margin-bottom: 3px;
+        font-size: 17px;
+      }
+
+      .flow-box span {
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .status-strip {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 8px;
+        margin-top: 16px;
+      }
+
+      .status {
+        border: 1px solid var(--line);
+        background: #fafbfa;
+        padding: 10px;
+        min-height: 78px;
+      }
+
+      .status b {
+        display: block;
+        color: var(--ink);
+        font-size: 12px;
+      }
+
+      .status span {
+        display: block;
+        margin-top: 6px;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.4;
+      }
+
+      .section {
+        padding: 74px 0;
+        border-top: 1px solid rgba(23, 26, 24, 0.09);
+      }
+
+      .section.alt {
+        background: rgba(255, 255, 255, 0.54);
+      }
+
+      .section-head {
+        display: grid;
+        grid-template-columns: minmax(0, 0.95fr) minmax(280px, 0.65fr);
+        gap: 34px;
+        align-items: end;
+        margin-bottom: 34px;
+      }
+
+      .section-head p {
+        margin: 0;
+        color: var(--muted);
+        font-size: 17px;
+      }
+
+      .cards {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+      }
+
+      .card {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        padding: 22px;
+        min-height: 210px;
+      }
+
+      .card-number {
+        display: inline-grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        margin-bottom: 30px;
+        border: 1px solid currentColor;
+        color: var(--green);
+        font-weight: 900;
+      }
+
+      .card p,
+      .plain-card p,
+      .timeline-card p {
+        margin: 12px 0 0;
+        color: var(--muted);
+      }
+
+      .backup-grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.9fr) minmax(360px, 1fr);
+        gap: 18px;
+        align-items: stretch;
+      }
+
+      .backup-card {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        padding: 24px;
+      }
+
+      .backup-card.accent {
+        border-color: var(--ink);
+        background:
+          linear-gradient(135deg, rgba(199, 131, 29, 0.12), transparent 46%),
+          var(--panel);
+        box-shadow: var(--shadow);
+      }
+
+      .backup-card p {
+        margin: 12px 0 0;
+        color: var(--muted);
+      }
+
+      .pills {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 22px;
+      }
+
+      .pill {
+        border: 1px solid var(--line);
+        background: #fafbfa;
+        padding: 7px 10px;
+        color: #38413c;
+        font-size: 13px;
+        font-weight: 800;
+      }
+
+      .ledger {
+        margin-top: 18px;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.72);
+      }
+
+      .ledger-row {
+        display: grid;
+        grid-template-columns: 110px minmax(0, 1fr);
+        border-top: 1px solid var(--line);
+      }
+
+      .ledger-row:first-child {
+        border-top: 0;
+      }
+
+      .ledger-key,
+      .ledger-value {
+        padding: 12px 14px;
+        font-size: 14px;
+      }
+
+      .ledger-key {
+        border-right: 1px solid var(--line);
+        color: var(--blue);
+        font-weight: 900;
+      }
+
+      .ledger-value {
+        color: var(--muted);
+      }
+
+      .split {
+        display: grid;
+        grid-template-columns: minmax(0, 0.85fr) minmax(360px, 1fr);
+        gap: 38px;
+        align-items: start;
+      }
+
+      .plain-card {
+        border: 1px solid var(--line);
+        background: var(--panel);
+        padding: 24px;
+      }
+
+      .plain-card + .plain-card {
+        margin-top: 12px;
+      }
+
+      .do-dont {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 14px;
+      }
+
+      .list {
+        margin: 20px 0 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .list li {
+        position: relative;
+        padding: 13px 0 13px 28px;
+        border-top: 1px solid var(--line);
+      }
+
+      .list li::before {
+        content: "";
+        position: absolute;
+        left: 0;
+        top: 21px;
+        width: 10px;
+        height: 10px;
+        background: var(--green);
+      }
+
+      .list.warn li::before {
+        background: var(--red);
+      }
+
+      .timeline {
+        display: grid;
+        grid-template-columns: repeat(5, 1fr);
+        gap: 0;
+        border: 1px solid var(--line);
+        background: var(--panel);
+      }
+
+      .timeline-card {
+        min-height: 220px;
+        padding: 22px;
+        border-right: 1px solid var(--line);
+      }
+
+      .timeline-card:last-child {
+        border-right: 0;
+      }
+
+      .timeline-card .step {
+        display: block;
+        margin-bottom: 42px;
+        color: var(--blue);
+        font-size: 13px;
+        font-weight: 900;
+      }
+
+      .quote-band {
+        background: var(--ink);
+        color: #fff;
+      }
+
+      .quote {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) minmax(260px, 0.45fr);
+        gap: 34px;
+        align-items: center;
+        padding: 74px 0;
+      }
+
+      .quote strong {
+        display: block;
+        font-family:
+          "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", Georgia,
+          serif;
+        font-size: clamp(28px, 4vw, 52px);
+        line-height: 1.2;
+      }
+
+      .quote p {
+        margin: 0;
+        color: rgba(255, 255, 255, 0.74);
+        font-size: 17px;
+      }
+
+      .final-grid {
+        display: grid;
+        grid-template-columns: 0.8fr 1fr;
+        gap: 30px;
+        align-items: start;
+      }
+
+      .checklist {
+        border: 1px solid var(--ink);
+        background: var(--panel);
+        box-shadow: var(--shadow);
+      }
+
+      .check-row {
+        display: grid;
+        grid-template-columns: 46px minmax(0, 1fr);
+        border-top: 1px solid var(--line);
+      }
+
+      .check-row:first-child {
+        border-top: 0;
+      }
+
+      .check-icon {
+        display: grid;
+        place-items: center;
+        border-right: 1px solid var(--line);
+        color: var(--green);
+        font-weight: 900;
+      }
+
+      .check-text {
+        padding: 15px 18px;
+      }
+
+      .check-text b {
+        display: block;
+      }
+
+      .check-text span {
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      .footer {
+        padding: 34px 0 44px;
+        border-top: 1px solid rgba(23, 26, 24, 0.09);
+        color: var(--muted);
+        font-size: 14px;
+      }
+
+      @media (max-width: 920px) {
+        .hero-grid,
+        .section-head,
+        .split,
+        .quote,
+        .final-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .cards,
+        .timeline,
+        .do-dont,
+        .backup-grid {
+          grid-template-columns: 1fr;
+        }
+
+        .timeline-card {
+          min-height: auto;
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .timeline-card:last-child {
+          border-bottom: 0;
+        }
+
+        .timeline-card .step {
+          margin-bottom: 18px;
+        }
+
+        .nav {
+          display: none;
+        }
+      }
+
+      @media (max-width: 560px) {
+        .wrap {
+          width: min(100% - 24px, 1120px);
+        }
+
+        .hero {
+          padding-top: 52px;
+        }
+
+        .hero-panel {
+          margin-top: 8px;
+        }
+
+        .flow-row {
+          grid-template-columns: 1fr;
+        }
+
+        .flow-label {
+          min-height: 34px;
+        }
+
+        .status-strip {
+          grid-template-columns: 1fr;
+        }
+
+        .ledger-row {
+          grid-template-columns: 1fr;
+        }
+
+        .ledger-key {
+          border-right: 0;
+          border-bottom: 1px solid var(--line);
+        }
+
+        .button {
+          width: 100%;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="page">
+      <header class="topbar">
+        <div class="wrap topbar-inner">
+          <div class="brand">
+            <div class="brand-mark">O</div>
+            <span>opsctl 思路说明</span>
+          </div>
+          <nav class="nav" aria-label="页面导航">
+            <a href="#problem">为什么</a>
+            <a href="#idea">怎么做</a>
+            <a href="#flow">部署流程</a>
+            <a href="#backup">快照回滚</a>
+            <a href="#first">第一版</a>
+          </nav>
+        </div>
+      </header>
+
+      <main>
+        <section class="hero">
+          <div class="wrap hero-grid">
+            <div>
+              <p class="eyebrow">轻量、不接管、专门保护服务器</p>
+              <h1>给 AI 部署加一道看得见的安全门。</h1>
+              <p class="hero-copy">
+                这不是另一个控制面板，也不是完整的部署平台。它更像服务器门口的值班员：
+                先看清现状，再检查计划，确认安全后才放行。
+              </p>
+              <div class="hero-actions">
+                <a class="button" href="#idea">看核心思路</a>
+                <a class="button secondary" href="#flow">看部署过程</a>
+              </div>
+            </div>
+
+            <aside class="hero-panel" aria-label="部署护栏示意">
+              <div class="panel-header">
+                <span>DEPLOY GATE</span>
+                <span>本机使用 · 不开放公网</span>
+              </div>
+              <div class="panel-body">
+                <div class="flow">
+                  <div class="flow-row">
+                    <div class="flow-label">AI</div>
+                    <div class="flow-box">
+                      <strong>提交部署想法</strong>
+                      <span>例如要启动新项目、绑定域名、使用某个端口。</span>
+                    </div>
+                  </div>
+                  <div class="flow-row">
+                    <div class="flow-label">检查</div>
+                    <div class="flow-box">
+                      <strong>确认不会撞车</strong>
+                      <span>看端口、服务、数据目录、Docker 卷、Caddy 路由。</span>
+                    </div>
+                  </div>
+                  <div class="flow-row">
+                    <div class="flow-label">审批</div>
+                    <div class="flow-box">
+                      <strong>危险动作先问你</strong>
+                      <span>涉及删除、覆盖、迁移、停生产服务时必须确认。</span>
+                    </div>
+                  </div>
+                  <div class="flow-row">
+                    <div class="flow-label">执行</div>
+                    <div class="flow-box">
+                      <strong>只执行通过的计划</strong>
+                      <span>留下记录，方便排查和回滚。</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="status-strip">
+                  <div class="status">
+                    <b>不替代 Docker</b>
+                    <span>只是把风险动作先拦住。</span>
+                  </div>
+                  <div class="status">
+                    <b>不替代 Caddy</b>
+                    <span>只帮你检查路由是否安全。</span>
+                  </div>
+                  <div class="status">
+                    <b>不做公网后台</b>
+                    <span>本机 TUI 和本地 MCP 就够。</span>
+                  </div>
+                </div>
+              </div>
+            </aside>
+          </div>
+        </section>
+
+        <section id="problem" class="section alt">
+          <div class="wrap">
+            <div class="section-head">
+              <h2>问题不是 AI 会不会部署，而是它会不会误伤。</h2>
+              <p>
+                一台服务器上已经有多个业务、数据库、缓存、域名和端口。新的项目一部署，
+                如果没有统一登记和部署前检查，就可能把旧项目挤掉。
+              </p>
+            </div>
+
+            <div class="cards">
+              <article class="card">
+                <div class="card-number">1</div>
+                <h3>端口被占</h3>
+                <p>新项目默认用 3000、8080、5432，可能正好是老项目正在使用的端口。</p>
+              </article>
+              <article class="card">
+                <div class="card-number">2</div>
+                <h3>数据被碰</h3>
+                <p>数据库卷、上传目录、备份目录如果没有保护，误删一次就是生产事故。</p>
+              </article>
+              <article class="card">
+                <div class="card-number">3</div>
+                <h3>路由被覆盖</h3>
+                <p>域名反代一改错，原来能访问的网站就可能突然打不开。</p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section id="idea" class="section">
+          <div class="wrap split">
+            <div>
+              <h2>核心思路：不做平台，只做护栏。</h2>
+              <p class="hero-copy">
+                它不负责替你决定怎么部署，也不强迫所有项目改成同一种形态。
+                它只做一件事：让每次部署都先过一遍安全检查。
+              </p>
+            </div>
+
+            <div class="do-dont">
+              <article class="plain-card">
+                <h3>它要做的事</h3>
+                <ul class="list">
+                  <li>记录服务器上已有服务和端口。</li>
+                  <li>检查新项目会不会冲突。</li>
+                  <li>把危险动作列出来让你确认。</li>
+                  <li>给 AI 工具提供准确上下文。</li>
+                </ul>
+              </article>
+
+              <article class="plain-card">
+                <h3>它不做的事</h3>
+                <ul class="list warn">
+                  <li>不开放公网管理后台。</li>
+                  <li>不接管全部 Docker 和 Caddy。</li>
+                  <li>不让 AI 直接拿最高权限乱跑。</li>
+                  <li>不把服务器改成复杂平台。</li>
+                </ul>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section id="flow" class="section alt">
+          <div class="wrap">
+            <div class="section-head">
+              <h2>一次安全部署，大概分五步。</h2>
+              <p>
+                AI 仍然可以帮你写配置、构建项目、准备部署方案。但真正执行之前，
+                需要先经过这道门。
+              </p>
+            </div>
+
+            <div class="timeline">
+              <article class="timeline-card">
+                <span class="step">STEP 01</span>
+                <h3>读现状</h3>
+                <p>知道哪些端口、域名、容器、数据卷已经在用。</p>
+              </article>
+              <article class="timeline-card">
+                <span class="step">STEP 02</span>
+                <h3>看计划</h3>
+                <p>AI 先提交部署计划，而不是直接执行命令。</p>
+              </article>
+              <article class="timeline-card">
+                <span class="step">STEP 03</span>
+                <h3>查冲突</h3>
+                <p>发现端口、路由、数据目录或容器名冲突就阻断。</p>
+              </article>
+              <article class="timeline-card">
+                <span class="step">STEP 04</span>
+                <h3>问审批</h3>
+                <p>涉及删除、覆盖、迁移、停服务时必须让你确认。</p>
+              </article>
+              <article class="timeline-card">
+                <span class="step">STEP 05</span>
+                <h3>留记录</h3>
+                <p>每次部署都留下历史，出了问题能追溯。</p>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section id="backup" class="section">
+          <div class="wrap">
+            <div class="section-head">
+              <h2>更稳的做法：新项目部署前，先给服务器留一张快照。</h2>
+              <p>
+                快照不是为了让部署变慢，而是为了出问题时能回到一个明确的时间点。
+                这样第三个应用部署失败，也不会让前两个业务一起不可用。
+              </p>
+            </div>
+
+            <div class="backup-grid">
+              <article class="backup-card accent">
+                <h3>部署前先保存什么？</h3>
+                <p>
+                  不一定每次都克隆整台机器。更实用的是分层保存：配置、部署清单、
+                  数据库、Docker 卷、Caddy 路由和关键目录。
+                </p>
+                <div class="pills" aria-label="快照内容">
+                  <span class="pill">Caddy 配置</span>
+                  <span class="pill">Docker Compose</span>
+                  <span class="pill">数据库 dump</span>
+                  <span class="pill">Docker volumes</span>
+                  <span class="pill">项目 env 清单</span>
+                  <span class="pill">当前端口状态</span>
+                </div>
+              </article>
+
+              <article class="backup-card">
+                <h3>快照要能回答三个问题</h3>
+                <div class="ledger">
+                  <div class="ledger-row">
+                    <div class="ledger-key">部署前</div>
+                    <div class="ledger-value">服务器原来有哪些服务正在跑？入口在哪里？数据在哪里？</div>
+                  </div>
+                  <div class="ledger-row">
+                    <div class="ledger-key">部署中</div>
+                    <div class="ledger-value">这次计划会改哪些文件、端口、路由、容器和数据卷？</div>
+                  </div>
+                  <div class="ledger-row">
+                    <div class="ledger-key">失败后</div>
+                    <div class="ledger-value">应该停止什么、恢复什么、重新加载什么，才能回到部署前？</div>
+                  </div>
+                </div>
+              </article>
+            </div>
+          </div>
+        </section>
+
+        <section class="quote-band">
+          <div class="wrap quote">
+            <strong>把 AI 当成施工队，不要把总钥匙直接交出去。</strong>
+            <p>
+              施工队可以画图、搬材料、搭架子；但进生产机房、动数据库、改入口路由，
+              应该先登记、检查、签字。
+            </p>
+          </div>
+        </section>
+
+        <section id="first" class="section">
+          <div class="wrap final-grid">
+            <div>
+              <h2>第一版不用复杂。</h2>
+              <p class="hero-copy">
+                先做成一个 Rust 单文件工具：本地打开 TUI 给人看，通过 MCP 给 AI 读，
+                执行前用规则检查。没有网页后台，也不开放新端口。
+              </p>
+            </div>
+
+            <div class="checklist" aria-label="第一版功能清单">
+              <div class="check-row">
+                <div class="check-icon">✓</div>
+                <div class="check-text">
+                  <b>服务器登记簿</b>
+                  <span>记录服务、端口、域名、数据目录、备份位置。</span>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="check-icon">✓</div>
+                <div class="check-text">
+                  <b>部署前检查</b>
+                  <span>先检查 Docker、Caddy、端口、数据卷是否冲突。</span>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="check-icon">✓</div>
+                <div class="check-text">
+                  <b>危险操作审批</b>
+                  <span>删除、覆盖、迁移、停止生产服务都要确认。</span>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="check-icon">✓</div>
+                <div class="check-text">
+                  <b>部署前快照</b>
+                  <span>保存配置、路由、数据和回滚说明，失败时能恢复到部署前。</span>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="check-icon">✓</div>
+                <div class="check-text">
+                  <b>本地 TUI</b>
+                  <span>你 SSH 进去就能看服务器状态和待审批事项。</span>
+                </div>
+              </div>
+              <div class="check-row">
+                <div class="check-icon">✓</div>
+                <div class="check-text">
+                  <b>本地 MCP</b>
+                  <span>Codex、Claude Code、opencode 只读上下文，少猜少误操作。</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <footer class="footer">
+        <div class="wrap">
+          这个页面描述的是轻量方案：它不是 PaaS，也不是控制面板，而是给 AI
+          部署加上的本机安全闸门。
+        </div>
+      </footer>
+    </div>
+  </body>
+</html>

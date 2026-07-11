@@ -1,0 +1,16 @@
+[Unit]
+Description=Resume bounded opsctl volume protection campaign %i
+Documentation=file:/usr/share/doc/opsctl/DEBIAN_INSTALL.md
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=oneshot
+Environment=OPSCTL_LOCK_WAIT_SECONDS=1800
+EnvironmentFile=-/etc/opsctl/backup.env
+EnvironmentFile=-/etc/opsctl/restic.env
+ExecStart=/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl backup volume-protect campaign-resume %i --execute
+NoNewPrivileges=true
+PrivateTmp=true
+TimeoutStartSec=55m
+UMask=0077

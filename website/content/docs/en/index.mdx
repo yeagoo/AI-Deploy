@@ -1,0 +1,40 @@
+---
+title: Product overview
+description: opsctl is a read-only-first, evidence-driven safety controller for single-server production.
+icon: BookOpen
+---
+
+opsctl connects server registry, preflight, backup and recovery, human approval, and verifiable audit in one typed workflow. It is built for teams running one or a few servers that still need production-grade safety boundaries.
+
+<Callout type="info" title="Core principle">
+  AI may observe, explain, and draft plans. It cannot approve itself through vague authority, and it cannot disguise destructive resource cleanup as automation.
+</Callout>
+
+## What you can do
+
+<Cards>
+  <Card title="Get started" description="Install, validate the registry, and run your first read-only checks." href="./getting-started" />
+  <Card title="Understand the safety model" description="Read-only defaults, global locking, approval, and execution boundaries." href="./safety-model" />
+  <Card title="Configure the registry" description="Declare services, ports, domains, volumes, and backup policy." href="./registry" />
+  <Card title="Backup and recovery" description="Move from plans and repository checks to isolated restore drills." href="./backup-recovery" />
+  <Card title="Evidence governance" description="Signatures, checkpoints, archive drills, and retention attestation." href="./evidence-governance" />
+  <Card title="CLI reference" description="Common read-only and controlled execution entry points." href="./cli-reference" />
+</Cards>
+
+## How it works
+
+1. **Declare intent:** the YAML registry is the desired-state source of truth.
+2. **Observe reality:** scanners read systemd, Docker, ports, and Caddy state.
+3. **Explain differences:** doctor, drift, and preflight return structured risk decisions.
+4. **Build recovery:** snapshots, backups, repository checks, and isolated restores produce evidence.
+5. **Hand off to a human:** only specific, unexpired, scope-matching approval can advance controlled execution.
+
+## Deliberate non-goals
+
+- No automatic production approval.
+- No automatic Docker volume deletion.
+- No write or execution surface through MCP.
+- No claim that a successful backup alone proves recovery.
+- No credential values in reports.
+
+Continue with [Get started](./getting-started) and meet opsctl through a fully read-only workflow.

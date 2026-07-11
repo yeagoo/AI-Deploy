@@ -1,0 +1,12 @@
+[Unit]
+Description=Verify opsctl evidence chain, manifests, and checkpoints
+
+[Service]
+Type=oneshot
+User=opsctl
+Group=opsctl
+ExecStart=/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry drift cleanup-request evidence-verify-all
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/opsctl

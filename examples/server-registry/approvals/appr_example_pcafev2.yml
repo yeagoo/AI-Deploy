@@ -1,0 +1,15 @@
+id: appr_example_pcafev2
+plan_id: deploy_example_pcafev2
+status: requested
+requested_by: codex
+requested_at: "2026-07-04T01:55:00+08:00"
+expires_at: "2026-07-04T02:55:00+08:00"
+reason: Example approval request for Caddy route change and production migration.
+scope:
+  - caddy_route_change
+  - production_migration
+constraints:
+  - A complete snapshot must exist before deployment.
+  - The Postgres port should not be exposed publicly.
+notes: Example approval. Not valid for real deployment.
+

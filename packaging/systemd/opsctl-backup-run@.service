@@ -1,0 +1,16 @@
+[Unit]
+Description=opsctl controlled backup run for %i
+Documentation=file:/usr/share/doc/opsctl/DEBIAN_INSTALL.md
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+Environment=OPSCTL_LOCK_WAIT_SECONDS=21600
+EnvironmentFile=-/etc/opsctl/backup.env
+EnvironmentFile=-/etc/opsctl/restic.env
+ExecStart=/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl backup run %i --execute
+TimeoutStartSec=12h
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true

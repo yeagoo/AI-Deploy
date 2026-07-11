@@ -1,0 +1,35 @@
+id: deploy_example_pcafev2
+actor: codex
+service_id: pcafev2
+project_root: /home/ivmm/daohang/pcafev2
+intent: deploy
+environment: production
+changes:
+  ports:
+    reserve:
+      - 39800
+      - 55432
+  caddy:
+    routes:
+      - host: p.cafe
+        upstream: 127.0.0.1:39800
+  docker:
+    compose_project: pcafev2
+    containers:
+      - pcafe-db
+    volumes:
+      - pcafe-pg-data
+  files:
+    write:
+      - /etc/caddy/Caddyfile
+  migrations:
+    required: true
+    command: npm run db:migrate
+  destructive_ops: []
+snapshot_required: true
+approvals_required:
+  - caddy_route_change
+  - production_migration
+preflight:
+  status: pending
+notes: Example deploy plan. It should not be executed.

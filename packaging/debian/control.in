@@ -1,0 +1,11 @@
+Package: opsctl
+Version: @VERSION@
+Section: admin
+Priority: optional
+Architecture: @ARCH@
+Maintainer: opsctl maintainers <root@localhost>
+Depends: libc6, ca-certificates, adduser
+Description: Local deployment safety gate for AI-assisted Debian servers
+ opsctl keeps local server facts, deployment plans, approvals, snapshots,
+ audit logs, and read-only AI integration outputs in one small CLI/TUI tool.
+ It is intended for single Debian servers where AI coding tools deploy over SSH.
