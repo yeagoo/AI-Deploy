@@ -93,9 +93,9 @@ The repository includes:
 - `scripts/install-sudoers.sh`
 - `opsctl helper sudoers-check`
 
-The installer is dry-run by default. It requires `OPSCTL_SUDOERS_APPLY=1` and root before writing `/etc/sudoers.d/opsctl-helper`. It validates the generated file with `visudo -cf` before installation and runs `opsctl helper sudoers-check` after installation when `opsctl` is available.
+The installer is dry-run by default. It requires `OPSCTL_SUDOERS_APPLY=1` and root before writing `/etc/sudoers.d/opsctl-helper`. It validates the generated file with `visudo -cf` before installation and runs `opsctl helper sudoers-check` after installation when `opsctl` is available. The generated policy also permits only `install-check --json`, `registry validate --json`, and `deploy-gates --json` with exact production paths. Those inspections run as root because registered production paths are intentionally not readable by the service user; no extra opsctl arguments are allowed.
 
-`opsctl helper sudoers-check` rejects symlinked or missing policy files, group/other writable files, policies that do not mention `opsctl helper run-deploy-operation`, and broad patterns such as `NOPASSWD: ALL`, Docker, shell, `rm`, or `systemctl`.
+`opsctl helper sudoers-check` rejects symlinked or missing policy files, group/other writable files, policies that do not mention `opsctl helper run-deploy-operation`, incomplete or wrong-run-as read-only aliases, and broad patterns such as arbitrary `opsctl *`, `NOPASSWD: ALL`, Docker, shell, `rm`, or `systemctl`.
 
 ## Audit Requirements
 

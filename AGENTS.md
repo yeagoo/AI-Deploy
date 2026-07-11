@@ -38,6 +38,7 @@ An `AGENTS.md` inside a subdirectory may add narrower rules for that subtree. Th
 - Before publishing, inspect the staged file list and run a secret scan. Treat a public repository as permanent disclosure.
 - Do not use real production service names, domains, paths, bucket names, snapshot IDs, approval tokens, or credential material in new examples or tests. Use `example.invalid`, `example.com`, temporary directories, and clearly synthetic IDs.
 - Do not mutate `/etc`, `/srv`, `/var/lib/opsctl`, `/var/backups`, Docker, systemd, Caddy, an object store, or a production registry unless the user explicitly requested that external mutation.
+- Production read-only gates use exact reviewed `sudo -n /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl ... --json` sudoers entries. They run as root only because readiness inspection needs protected project paths; never add arbitrary arguments or make private paths group-accessible instead.
 
 ## Rust implementation rules
 

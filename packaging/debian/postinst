@@ -60,11 +60,21 @@ if command -v getent >/dev/null 2>&1 && getent group "$OPSCTL_GROUP" >/dev/null;
   find "$REGISTRY_DIR" -type f -name '*.md' -exec chmod 0640 {} \; || true
 fi
 if command -v getent >/dev/null 2>&1 && getent passwd "$OPSCTL_USER" >/dev/null && getent group "$OPSCTL_GROUP" >/dev/null; then
-  chown "$OPSCTL_USER:$OPSCTL_GROUP" "$STATE_DIR" "$STATE_DIR/deploy-journals" "$STATE_DIR/restore-drills" "$STATE_DIR/volume-protect-restores" || true
+  # Repair the state control plane without rewriting ownership inside restore
+  # staging trees or root-created database dumps. Restored UID/GID metadata is
+  # part of recovery verification and must survive package upgrades.
+  chown "$OPSCTL_USER:$OPSCTL_GROUP" "$STATE_DIR"
+  find "$STATE_DIR" -xdev -mindepth 1 -maxdepth 1 -exec chown -h "$OPSCTL_USER:$OPSCTL_GROUP" {} +
 fi
 
 if command -v opsctl >/dev/null 2>&1; then
-  opsctl --registry "$REGISTRY_DIR" --state-dir "$STATE_DIR" install-check >/dev/null || true
+  # Running this as root would immediately create root-owned 0600 audit files
+  # inside the opsctl-owned state directory.
+  if command -v runuser >/dev/null 2>&1; then
+    runuser -u "$OPSCTL_USER" -- opsctl --registry "$REGISTRY_DIR" --state-dir "$STATE_DIR" install-check >/dev/null || true
+  else
+    echo "opsctl: runuser unavailable; skipped service-user install check" >&2
+  fi
 fi
 
 exit 0

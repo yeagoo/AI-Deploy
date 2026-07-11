@@ -361,6 +361,7 @@ if [ "$USE_DEB" = "1" ]; then
   ssh_root "test -f /usr/share/opsctl/templates/sudoers.opsctl.example && test -f /usr/share/opsctl/scripts/install-sudoers.sh"
   ssh_root "test \"\$(stat -c '%a' /srv/server-registry)\" = '750' && test \"\$(stat -c '%G' /srv/server-registry)\" = 'opsctl'"
   ssh_root "test \"\$(stat -c '%a' /var/lib/opsctl)\" = '700' && test \"\$(stat -c '%U:%G' /var/lib/opsctl)\" = 'opsctl:opsctl'"
+  ssh_root "test \"\$(stat -c '%U:%G' /var/lib/opsctl/opsctl.db)\" = 'opsctl:opsctl' && test \"\$(stat -c '%U:%G' /var/lib/opsctl/audit.log)\" = 'opsctl:opsctl'"
   ssh_root "cp /usr/share/opsctl/templates/sudoers.opsctl.example /tmp/opsctl-sudoers && chmod 0440 /tmp/opsctl-sudoers"
   ssh_root "/usr/bin/opsctl helper sudoers-check --path /tmp/opsctl-sudoers --json >/tmp/opsctl-sudoers-check.json && visudo -cf /tmp/opsctl-sudoers"
   ssh_root "dpkg -i /tmp/opsctl.deb"
@@ -374,7 +375,7 @@ else
   opsctl_bin="/usr/local/bin/opsctl"
 fi
 
-ssh_root "$opsctl_bin --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json >/tmp/opsctl-install-check.json"
+ssh_root "runuser -u opsctl -- $opsctl_bin --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json >/tmp/opsctl-install-check.json"
 ssh_root "$opsctl_bin --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-journals --json >/tmp/opsctl-deploy-journals.json"
 ssh_root "test -s /tmp/opsctl-install-check.json && test -s /tmp/opsctl-deploy-journals.json"
 

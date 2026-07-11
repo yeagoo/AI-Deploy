@@ -71,10 +71,18 @@ if command -v getent >/dev/null 2>&1 && getent group "$OPSCTL_GROUP" >/dev/null;
   find "$REGISTRY_DIR" -type f -name '*.md' -exec chmod 0640 {} \; || true
 fi
 if command -v getent >/dev/null 2>&1 && getent passwd "$OPSCTL_USER" >/dev/null && getent group "$OPSCTL_GROUP" >/dev/null; then
-  chown "$OPSCTL_USER:$OPSCTL_GROUP" "$STATE_DIR" "$STATE_DIR/deploy-journals" || true
+  # Repair the state control plane without rewriting ownership inside restore
+  # staging trees or root-created database dumps.
+  chown "$OPSCTL_USER:$OPSCTL_GROUP" "$STATE_DIR"
+  find "$STATE_DIR" -xdev -mindepth 1 -maxdepth 1 -exec chown -h "$OPSCTL_USER:$OPSCTL_GROUP" {} +
 fi
 
-"$BIN_DST" --registry "$REGISTRY_DIR" --state-dir "$STATE_DIR" install-check >/dev/null
+if command -v runuser >/dev/null 2>&1; then
+  runuser -u "$OPSCTL_USER" -- "$BIN_DST" --registry "$REGISTRY_DIR" --state-dir "$STATE_DIR" install-check >/dev/null
+else
+  echo "runuser is required to verify the installation as $OPSCTL_USER" >&2
+  exit 1
+fi
 
 echo "installed $BIN_DST"
 echo "registry: $REGISTRY_DIR"

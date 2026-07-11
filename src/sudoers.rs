@@ -140,8 +140,65 @@ fn check_policy_content(raw: &str, findings: &mut Vec<SudoersFinding>) {
     if !effective_policy.contains("opsctl helper run-deploy-operation") {
         findings.push(error_finding(
             "missing_opsctl_helper",
-            "policy must allow only opsctl helper run-deploy-operation",
+            "policy must retain the typed opsctl helper run-deploy-operation allowlist",
         ));
+    }
+
+    if effective_policy.contains("OPSCTL_READONLY") {
+        const READONLY_COMMANDS: [&str; 6] = [
+            "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json",
+            "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json",
+            "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json",
+            "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json",
+            "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json",
+            "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json",
+        ];
+        let alias_lines = effective_policy
+            .lines()
+            .filter_map(|line| {
+                line.trim()
+                    .strip_prefix("Cmnd_Alias OPSCTL_READONLY =")
+                    .map(str::trim)
+            })
+            .collect::<Vec<_>>();
+        let alias_is_exact = alias_lines.len() == 1 && {
+            let commands = alias_lines[0].split(',').map(str::trim).collect::<Vec<_>>();
+            commands.len() == READONLY_COMMANDS.len()
+                && READONLY_COMMANDS
+                    .iter()
+                    .all(|required| commands.contains(required))
+        };
+        if !alias_is_exact {
+            findings.push(error_finding(
+                "unsafe_readonly_allowlist",
+                "OPSCTL_READONLY must contain exactly the six reviewed production gate commands",
+            ));
+        }
+
+        let authorization_lines = effective_policy
+            .lines()
+            .filter(|line| {
+                line.contains("OPSCTL_READONLY")
+                    && !line
+                        .trim_start()
+                        .starts_with("Cmnd_Alias OPSCTL_READONLY =")
+            })
+            .collect::<Vec<_>>();
+        let runas_is_exact = authorization_lines.len() == 1 && {
+            let fields = authorization_lines[0]
+                .split_whitespace()
+                .collect::<Vec<_>>();
+            fields.len() == 4
+                && fields[1] == "ALL=(root)"
+                && fields[2] == "NOPASSWD:"
+                && fields[3] == "OPSCTL_READONLY"
+        };
+        if !runas_is_exact {
+            findings.push(error_finding(
+                "unsafe_readonly_runas",
+                "OPSCTL_READONLY must have one exact root run-as entry and no additional aliases",
+            ));
+        }
     }
 
     for forbidden in [
@@ -157,6 +214,8 @@ fn check_policy_content(raw: &str, findings: &mut Vec<SudoersFinding>) {
         "docker *",
         "rm *",
         "systemctl *",
+        "/usr/bin/opsctl *",
+        "/usr/local/bin/opsctl *",
     ] {
         if effective_policy.contains(forbidden) {
             findings.push(error_finding(
@@ -260,6 +319,106 @@ mod tests {
                 .findings
                 .iter()
                 .any(|finding| finding.code == "forbidden_command")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sudoers_check_accepts_exact_readonly_root_policy() -> Result<()> {
+        let temp = TempDir::new()?;
+        let fake_visudo = std::path::Path::new("/bin/true");
+        let policy = temp.path().join("opsctl-helper");
+        std::fs::write(
+            &policy,
+            concat!(
+                "Cmnd_Alias OPSCTL_HELPER = /usr/bin/opsctl helper run-deploy-operation *\n",
+                "Cmnd_Alias OPSCTL_READONLY = ",
+                "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json, ",
+                "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json, ",
+                "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json, ",
+                "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json, ",
+                "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json, ",
+                "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json\n",
+                "ai-deploy ALL=(root) NOPASSWD: OPSCTL_HELPER\n",
+                "ai-deploy ALL=(root) NOPASSWD: OPSCTL_READONLY\n",
+            ),
+        )?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&policy, std::os::unix::fs::PermissionsExt::from_mode(0o440))?;
+
+        let report = super::check_sudoers_file_with_visudo(&policy, Some(fake_visudo));
+
+        assert!(report.ok, "{report:?}");
+        Ok(())
+    }
+
+    #[test]
+    fn sudoers_check_rejects_readonly_alias_with_wrong_runas() -> Result<()> {
+        let temp = TempDir::new()?;
+        let fake_visudo = std::path::Path::new("/bin/true");
+        let policy = temp.path().join("opsctl-helper");
+        std::fs::write(
+            &policy,
+            concat!(
+                "Cmnd_Alias OPSCTL_HELPER = /usr/bin/opsctl helper run-deploy-operation *\n",
+                "Cmnd_Alias OPSCTL_READONLY = ",
+                "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json, ",
+                "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json, ",
+                "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json, ",
+                "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json, ",
+                "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json, ",
+                "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json\n",
+                "ai-deploy ALL=(root) NOPASSWD: OPSCTL_HELPER\n",
+                "ai-deploy ALL=(opsctl) NOPASSWD: OPSCTL_READONLY\n",
+            ),
+        )?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&policy, std::os::unix::fs::PermissionsExt::from_mode(0o440))?;
+
+        let report = super::check_sudoers_file_with_visudo(&policy, Some(fake_visudo));
+
+        assert!(!report.ok);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "unsafe_readonly_runas")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn sudoers_check_rejects_extra_readonly_command() -> Result<()> {
+        let temp = TempDir::new()?;
+        let fake_visudo = std::path::Path::new("/bin/true");
+        let policy = temp.path().join("opsctl-helper");
+        std::fs::write(
+            &policy,
+            concat!(
+                "Cmnd_Alias OPSCTL_HELPER = /usr/bin/opsctl helper run-deploy-operation *\n",
+                "Cmnd_Alias OPSCTL_READONLY = ",
+                "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json, ",
+                "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json, ",
+                "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json, ",
+                "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json, ",
+                "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json, ",
+                "/usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json, ",
+                "/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl status --json\n",
+                "ai-deploy ALL=(root) NOPASSWD: OPSCTL_HELPER\n",
+                "ai-deploy ALL=(root) NOPASSWD: OPSCTL_READONLY\n",
+            ),
+        )?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&policy, std::os::unix::fs::PermissionsExt::from_mode(0o440))?;
+
+        let report = super::check_sudoers_file_with_visudo(&policy, Some(fake_visudo));
+
+        assert!(!report.ok);
+        assert!(
+            report
+                .findings
+                .iter()
+                .any(|finding| finding.code == "unsafe_readonly_allowlist")
         );
         Ok(())
     }

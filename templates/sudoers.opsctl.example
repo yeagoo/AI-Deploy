@@ -4,11 +4,15 @@
 #
 # Intended model:
 # - AI tools call opsctl as an unprivileged user.
+# - Three exact read-only production gates run as root so protected registered
+#   project paths can be inspected without granting broad filesystem access.
 # - opsctl verifies registry, preflight, snapshot, and approval gates.
 # - opsctl helper executes one typed deploy operation by order.
 # - sudoers allows only that helper, never arbitrary docker/caddy/systemctl.
 
 Cmnd_Alias OPSCTL_HELPER = /usr/bin/opsctl helper run-deploy-operation *, /usr/local/bin/opsctl helper run-deploy-operation *
+Cmnd_Alias OPSCTL_READONLY = /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json, /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json, /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json, /usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json, /usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json, /usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json
 
 # Replace `opsctl` with the Unix user that runs Codex/Claude Code/opencode.
 opsctl ALL=(root) NOPASSWD: OPSCTL_HELPER
+opsctl ALL=(root) NOPASSWD: OPSCTL_READONLY

@@ -112,6 +112,8 @@ test "$(stat -c "%a" /srv/server-registry)" = "2750"
 test "$(stat -c "%G" /srv/server-registry)" = "opsctl"
 test "$(stat -c "%a" /var/lib/opsctl)" = "700"
 test "$(stat -c "%U:%G" /var/lib/opsctl)" = "opsctl:opsctl"
+test "$(stat -c "%U:%G" /var/lib/opsctl/opsctl.db)" = "opsctl:opsctl"
+test "$(stat -c "%U:%G" /var/lib/opsctl/audit.log)" = "opsctl:opsctl"
 test "$(stat -c "%a" /var/lib/opsctl/restore-drills)" = "700"
 test "$(stat -c "%U:%G" /var/lib/opsctl/restore-drills)" = "opsctl:opsctl"
 test "$(stat -c "%a" /var/lib/opsctl/volume-protect-restores)" = "700"
@@ -119,8 +121,12 @@ test "$(stat -c "%U:%G" /var/lib/opsctl/volume-protect-restores)" = "opsctl:opsc
 test -d /etc/opsctl
 printf "registry-preserved\n" >/srv/server-registry/history/package-upgrade-sentinel
 printf "state-preserved\n" >/var/lib/opsctl/package-upgrade-sentinel
-/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json >/tmp/install-check.json
+runuser -u opsctl -- /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json >/tmp/install-check.json
 grep -q "\"ok\":true" /tmp/install-check.json
+chown root:root /var/lib/opsctl/audit.log
+mkdir -p /var/lib/opsctl/restore-drills/ownership-sentinel
+touch /var/lib/opsctl/restore-drills/ownership-sentinel/restored-file
+chown root:root /var/lib/opsctl/restore-drills/ownership-sentinel/restored-file
 
 cp /usr/share/opsctl/templates/sudoers.opsctl.example /tmp/opsctl-sudoers
 chmod 0440 /tmp/opsctl-sudoers
@@ -147,7 +153,10 @@ if [ -f /tmp/opsctl-previous.deb ]; then
 fi
 
 dpkg -i /tmp/opsctl.deb
-/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json >/tmp/install-check-after-upgrade.json
+test "$(stat -c "%U:%G" /var/lib/opsctl/package-upgrade-sentinel)" = "opsctl:opsctl"
+test "$(stat -c "%U:%G" /var/lib/opsctl/audit.log)" = "opsctl:opsctl"
+test "$(stat -c "%U:%G" /var/lib/opsctl/restore-drills/ownership-sentinel/restored-file)" = "root:root"
+runuser -u opsctl -- /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json >/tmp/install-check-after-upgrade.json
 grep -q "\"ok\":true" /tmp/install-check-after-upgrade.json
 
 dpkg -r opsctl

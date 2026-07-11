@@ -32,14 +32,14 @@ The installer creates:
 /var/lib/opsctl
 ```
 
-It also creates an `opsctl` system user/group when the platform provides `adduser`/`addgroup` or `useradd`/`groupadd`. The registry directory, top-level registry files, and standard registry subdirectories are grouped to `opsctl`; the state directory is owned by `opsctl:opsctl`.
+It also creates an `opsctl` system user/group when the platform provides `adduser`/`addgroup` or `useradd`/`groupadd`. The registry directory, top-level registry files, and standard registry subdirectories are grouped to `opsctl`; the private state root and its control-plane entries are owned by `opsctl:opsctl`. Package installation and upgrades run the layout check as that service identity so root-owned audit files are not introduced during installation. Upgrades do not recursively change restored UID/GID metadata or root-created database dump ownership.
 
 If `/srv/server-registry/services.yml` does not exist, the installer copies the example registry as a starting template.
 
 The installer runs a read-only layout check before returning:
 
 ```bash
-opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check
+sudo -u opsctl opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check
 ```
 
 ## Build A Debian Package
@@ -201,7 +201,7 @@ sudo OPSCTL_AI_USER=ai-deploy OPSCTL_SUDOERS_APPLY=1 scripts/install-sudoers.sh
 opsctl helper sudoers-check --path /etc/sudoers.d/opsctl-helper
 ```
 
-The sudoers policy should allow only `opsctl helper run-deploy-operation *`, never Docker, shell, `rm`, `systemctl`, or general `NOPASSWD: ALL`.
+The sudoers policy allows the typed root helper plus three exact root read-only gates. Root is required because deploy readiness inspects protected registered production paths; the alias fixes the binary, Registry/State paths, subcommand, and `--json` so the operator cannot append arbitrary opsctl arguments. It must never grant Docker, shell, `rm`, `systemctl`, arbitrary opsctl commands, or general `NOPASSWD: ALL`.
 
 ## Runtime Environment
 
@@ -218,6 +218,16 @@ Equivalent explicit command:
 ```bash
 opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl status
 ```
+
+The production state directory is deliberately mode `0700`; membership in the `opsctl` group does not grant direct access. Operators should use the reviewed sudoers policy for the three production gates:
+
+```bash
+sudo -n /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json
+sudo -n /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json
+sudo -n /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json
+```
+
+Do not make `/var/lib/opsctl` or protected project paths group-readable/group-writable to avoid the exact root read-only boundary.
 
 ## Smoke Test
 

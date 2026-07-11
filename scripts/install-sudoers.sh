@@ -16,13 +16,15 @@ tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
 
 cat > "$tmp" <<EOF
-# Managed opsctl helper policy.
+# Managed opsctl operator policy.
 # Review before installing. This policy must not grant Docker, shell, rm,
 # systemctl, or general root access to AI tool users.
 
 Cmnd_Alias OPSCTL_HELPER = /usr/bin/opsctl helper run-deploy-operation *, /usr/local/bin/opsctl helper run-deploy-operation *
+Cmnd_Alias OPSCTL_READONLY = /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json, /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json, /usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json, /usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl install-check --json, /usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry validate --json, /usr/local/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl deploy-gates --json
 
 $AI_USER ALL=(root) NOPASSWD: OPSCTL_HELPER
+$AI_USER ALL=(root) NOPASSWD: OPSCTL_READONLY
 EOF
 chmod 0440 "$tmp"
 
