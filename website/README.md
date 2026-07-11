@@ -53,7 +53,7 @@ Cloudflare Pages settings for Git integration:
 - Build output directory: `out`
 - Production branch: `main`
 
-`public/_redirects` sends `/` to the default Chinese locale. Do not replace the static search route with a server-only endpoint; Pages must be able to serve the generated index without a Worker.
+`public/_redirects` sends `/` to the default Chinese locale. `public/_headers` gives the extensionless search artifact its required JSON content type. Do not replace the static search route with a server-only endpoint; Pages must be able to serve the generated index without a Worker.
 
 ## Content structure
 
