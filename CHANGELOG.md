@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.6.3 - 2026-07-13
+
+- Made the registry rollback CLI contract derive its expected terminal status from the snapshot's optional captured artifacts, eliminating host-dependent behavior when `/etc/caddy/Caddyfile` exists locally but not on a clean CI runner.
+- Preserved the 0.6.2 runtime behavior and automatic-delivery safety boundaries; this patch changes release qualification coverage only.
+
 ## 0.6.2 - 2026-07-13
 
 - Added fail-closed managed-project compilation for bounded Node/systemd, static-site, and reviewed Compose profiles with immutable Git/source and supply-chain inputs.

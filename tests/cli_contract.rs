@@ -8243,6 +8243,7 @@ fn rollback_restore_replaces_temp_registry_after_approval_token() -> Result<()> 
         .join("manifest.yml");
     let mut manifest: serde_yaml::Value =
         serde_yaml::from_str(&std::fs::read_to_string(&manifest_path)?)?;
+    let optional_restore_available = manifest["artifacts"]["caddy_config"].as_str().is_some();
     manifest["limitations"] = serde_yaml::Value::Sequence(Vec::new());
     manifest["status"] = serde_yaml::Value::String("complete".to_string());
     std::fs::write(&manifest_path, serde_yaml::to_string(&manifest)?)?;
@@ -8293,7 +8294,14 @@ fn rollback_restore_replaces_temp_registry_after_approval_token() -> Result<()> 
         .clone();
     let restore_value: Value = serde_json::from_slice(&restore_output)?;
     assert_eq!(restore_value["data"]["registry_restored"], true);
-    assert_eq!(restore_value["data"]["status"], "partial");
+    assert_eq!(
+        restore_value["data"]["status"],
+        if optional_restore_available {
+            "partial"
+        } else {
+            "restored"
+        }
+    );
     let services_yml = std::fs::read_to_string(registry_dir.path().join("services.yml"))?;
     assert!(services_yml.contains("pcafev2"));
 
