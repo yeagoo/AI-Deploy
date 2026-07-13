@@ -1367,6 +1367,12 @@ for arg in "$@"; do
   init)
     exit 0
     ;;
+  unlock)
+    if [ "${OPSCTL_TEST_UNLOCK_FAIL:-}" = "1" ]; then
+      exit 7
+    fi
+    exit 0
+    ;;
   forget|check)
     exit 0
     ;;
@@ -1549,9 +1555,41 @@ history: []
     assert!(dump_path.exists());
     let operations = &run_value["data"]["targets"][0]["operations"];
     assert_json_operations_contain_kind(operations, "database_dump")?;
+    assert_json_operations_contain_kind(operations, "restic_unlock")?;
     assert_json_operations_contain_kind(operations, "restic_backup")?;
     assert_json_operations_contain_kind(operations, "restic_forget_prune")?;
     assert_json_operations_contain_kind(operations, "restic_check")?;
+
+    std::fs::remove_file(&dump_path)?;
+    let unlock_failure_output = opsctl_cmd()?
+        .env("OPSCTL_RESTIC_BIN", &restic)
+        .env("OPSCTL_PG_DUMP_BIN", &pg_dump)
+        .env("OPSCTL_TEST_RESTIC_PASSWORD_SET", "secret")
+        .env("OPSCTL_TEST_AWS_ACCESS_KEY_ID", "access")
+        .env("OPSCTL_TEST_UNLOCK_FAIL", "1")
+        .args([
+            "--state-dir",
+            &state_dir_arg,
+            "--registry",
+            &registry_arg,
+            "backup",
+            "run",
+            "pcafev2",
+            "--execute",
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let unlock_failure_value: Value = serde_json::from_slice(&unlock_failure_output)?;
+    assert_eq!(unlock_failure_value["data"]["status"], "failed");
+    let failed_operations = &unlock_failure_value["data"]["targets"][0]["operations"];
+    assert_eq!(failed_operations.as_array().map(Vec::len), Some(2));
+    assert_eq!(failed_operations[1]["kind"], "restic_unlock");
+    assert_eq!(failed_operations[1]["status"], "failed");
+    assert!(!dump_path.exists());
 
     let check_output = opsctl_cmd()?
         .env("OPSCTL_RESTIC_BIN", &restic)

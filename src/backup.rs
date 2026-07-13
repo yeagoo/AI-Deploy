@@ -2820,6 +2820,19 @@ fn plan_target(
         detail: "Verify required environment variable names are set; values are never printed or persisted by opsctl.".to_string(),
     });
 
+    if repository.provider == "restic" {
+        operations.push(BackupOperation {
+            order: operations.len() as u32 + 1,
+            kind: "restic_unlock".to_string(),
+            argv: restic_unlock_argv(repository),
+            env: operation_env.clone(),
+            detail: format!(
+                "Remove only stale Restic locks from repository {} before starting the controlled backup; active locks are preserved.",
+                repository.id
+            ),
+        });
+    }
+
     for dump in &target.database_dumps {
         operations.push(BackupOperation {
             order: operations.len() as u32 + 1,
@@ -2995,6 +3008,12 @@ fn restic_forget_all_argv(
 fn restic_check_argv(repository: &BackupRepository) -> Vec<String> {
     let mut argv = restic_base_argv(repository);
     argv.push("check".to_string());
+    argv
+}
+
+fn restic_unlock_argv(repository: &BackupRepository) -> Vec<String> {
+    let mut argv = restic_base_argv(repository);
+    argv.push("unlock".to_string());
     argv
 }
 
@@ -5095,7 +5114,8 @@ fn is_supported_backup_provider(provider: &str) -> bool {
 fn is_backup_execution_operation(kind: &str) -> bool {
     matches!(
         kind,
-        "restic_backup"
+        "restic_unlock"
+            | "restic_backup"
             | "restic_forget_prune"
             | "restic_check"
             | "restic_restore"
@@ -6539,6 +6559,83 @@ mod tests {
         };
 
         assert!(error.to_string().contains("backup plan is dry-run only"));
+        Ok(())
+    }
+
+    #[test]
+    fn restic_backup_plan_recovers_only_stale_locks_before_writes() -> Result<()> {
+        let registry = Registry::load("examples/server-registry")?;
+        let report = plan_backup(&BackupPlanOptions {
+            registry: &registry,
+            service_id: "caddy",
+            dry_run: true,
+        })?;
+        let target = report
+            .targets
+            .first()
+            .context("caddy backup target should be planned")?;
+        let unlock = target
+            .operations
+            .iter()
+            .find(|operation| operation.kind == "restic_unlock")
+            .context("Restic backup should plan stale-lock recovery")?;
+        let backup = target
+            .operations
+            .iter()
+            .find(|operation| operation.kind == "restic_backup")
+            .context("Restic backup operation should be planned")?;
+
+        assert!(unlock.order < backup.order);
+        assert_eq!(unlock.argv.last().map(String::as_str), Some("unlock"));
+        assert!(
+            !unlock
+                .argv
+                .iter()
+                .any(|argument| argument == "--remove-all")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn rustic_backup_plan_does_not_invent_restic_unlock_semantics() -> Result<()> {
+        let mut registry = Registry::load("examples/server-registry")?;
+        let repository_id = registry
+            .backups
+            .targets
+            .iter()
+            .find(|target| target.service_id == "caddy")
+            .map(|target| target.repository_id.clone())
+            .context("caddy backup target should exist")?;
+        registry
+            .backups
+            .repositories
+            .iter_mut()
+            .find(|repository| repository.id == repository_id)
+            .context("caddy backup repository should exist")?
+            .provider = "rustic".to_string();
+
+        let report = plan_backup(&BackupPlanOptions {
+            registry: &registry,
+            service_id: "caddy",
+            dry_run: true,
+        })?;
+        let target = report
+            .targets
+            .first()
+            .context("caddy backup target should be planned")?;
+
+        assert!(
+            target
+                .operations
+                .iter()
+                .all(|operation| operation.kind != "restic_unlock")
+        );
+        assert!(
+            target
+                .operations
+                .iter()
+                .any(|operation| operation.kind == "rustic_backup")
+        );
         Ok(())
     }
 

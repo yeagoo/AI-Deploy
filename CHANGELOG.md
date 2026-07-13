@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.4 - 2026-07-13
+
+- Added a fail-closed Restic stale-lock recovery step before controlled backups so a timed-out backup or restore process cannot leave retention/prune blocked indefinitely.
+- The recovery step uses plain `restic unlock` and never `--remove-all`, preserving every active repository lock while removing only locks Restic itself classifies as stale.
+- Kept the global mutation queue, bounded command timeout, dry-run planning, Secret redaction, and automatic-delivery safety boundaries unchanged.
+
 ## 0.6.3 - 2026-07-13
 
 - Made the registry rollback CLI contract derive its expected terminal status from the snapshot's optional captured artifacts, eliminating host-dependent behavior when `/etc/caddy/Caddyfile` exists locally but not on a clean CI runner.
