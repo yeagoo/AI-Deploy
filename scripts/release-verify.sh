@@ -38,6 +38,16 @@ release_dir = pathlib.Path(sys.argv[1])
 manifest = json.loads((release_dir / "RELEASE_MANIFEST.json").read_text())
 if manifest.get("schema_version") != "opsctl.release_manifest.v1":
     raise SystemExit("unexpected release manifest schema_version")
+source_commit = manifest.get("source_commit")
+if source_commit is not None:
+    if (
+        not isinstance(source_commit, str)
+        or len(source_commit) not in {40, 64}
+        or any(character not in "0123456789abcdef" for character in source_commit)
+    ):
+        raise SystemExit("invalid source_commit in release manifest")
+    if manifest.get("source_tree") != "clean":
+        raise SystemExit("release manifest source_tree must be clean")
 artifacts = manifest.get("artifacts")
 if not isinstance(artifacts, list) or not artifacts:
     raise SystemExit("release manifest has no artifacts")

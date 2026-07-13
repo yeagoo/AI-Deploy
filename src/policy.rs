@@ -7,7 +7,10 @@ use std::{
 use serde::Serialize;
 
 use crate::{
-    backup::{BackupPlanOptions, backup_history, plan_backup},
+    backup::{BackupPlanOptions, backup_history, backup_readiness, plan_backup},
+    managed_project::{
+        inspect_git_source, revalidate_managed_environment, revalidate_supply_chain,
+    },
     plan::{DeployPlan, PlanCaddyRoute},
     registry::{PortRecord, Registry, Service},
     snapshot::{SnapshotServiceCoverage, snapshot_coverage_from_registry},
@@ -60,6 +63,10 @@ pub fn evaluate_preflight(plan: &DeployPlan, registry: &Registry) -> PreflightRe
     let mut findings = Vec::new();
 
     check_plan_metadata(plan, &mut findings);
+    check_plan_source(plan, &mut findings);
+    check_managed_environment(plan, &mut findings);
+    check_supply_chain(plan, &mut findings);
+    check_managed_database(plan, registry, &mut findings);
     check_ports(plan, registry, &mut findings);
     check_caddy_routes(plan, registry, &mut findings);
     check_docker(plan, registry, &mut findings);
@@ -97,6 +104,116 @@ pub fn evaluate_preflight(plan: &DeployPlan, registry: &Registry) -> PreflightRe
         findings,
         approvals_required,
         snapshot_required: plan.snapshot_required.unwrap_or(false),
+    }
+}
+
+fn check_supply_chain(plan: &DeployPlan, findings: &mut Vec<PolicyFinding>) {
+    let Some(supply_chain) = &plan.supply_chain else {
+        if plan.managed_service.is_some() {
+            push(
+                findings,
+                PolicySeverity::Blocked,
+                "managed_supply_chain_missing",
+                "managed deploy plans require a lockfile-bound supply-chain contract",
+                Some("supply_chain"),
+            );
+        }
+        return;
+    };
+    if revalidate_supply_chain(&plan.project_root, supply_chain).is_err() {
+        push(
+            findings,
+            PolicySeverity::Blocked,
+            "managed_supply_chain_changed",
+            "managed lockfile or Compose input no longer matches its reviewed hash",
+            Some("supply_chain.inputs"),
+        );
+    }
+}
+
+fn check_managed_environment(plan: &DeployPlan, findings: &mut Vec<PolicyFinding>) {
+    let Some(environment) = plan
+        .managed_service
+        .as_ref()
+        .and_then(|service| service.environment.as_ref())
+    else {
+        return;
+    };
+    if revalidate_managed_environment(&plan.project_root, environment).is_err() {
+        push(
+            findings,
+            PolicySeverity::Blocked,
+            "managed_environment_invalid",
+            "managed environment file failed type, permission, assignment, or required-key validation",
+            Some(environment.file.display().to_string()),
+        );
+    }
+}
+
+fn check_managed_database(
+    plan: &DeployPlan,
+    registry: &Registry,
+    findings: &mut Vec<PolicyFinding>,
+) {
+    if plan.environment != "production"
+        || plan
+            .managed_service
+            .as_ref()
+            .and_then(|service| service.database.as_ref())
+            .is_none()
+    {
+        return;
+    }
+    let Some(service_id) = plan.service_id.as_deref() else {
+        return;
+    };
+    let readiness = backup_readiness(registry);
+    let history = backup_history(registry);
+    let plan_ready = readiness
+        .services
+        .iter()
+        .any(|service| service.service_id == service_id && service.status == "ready");
+    let history_ready = history
+        .services
+        .iter()
+        .any(|service| service.service_id == service_id && service.status == "ready");
+    if !plan_ready || !history_ready {
+        push(
+            findings,
+            PolicySeverity::Blocked,
+            "database_backup_restore_not_ready",
+            "managed production database deployment requires current backup, repository check, and restore drill readiness",
+            Some(service_id),
+        );
+    }
+}
+
+fn check_plan_source(plan: &DeployPlan, findings: &mut Vec<PolicyFinding>) {
+    let Some(source) = &plan.source else {
+        return;
+    };
+    match inspect_git_source(&plan.project_root, &source.commit, &source.branch) {
+        Ok(identity)
+            if identity.status == "ready"
+                && identity.origin_fingerprint.as_deref()
+                    == Some(source.origin_fingerprint.as_str()) => {}
+        Ok(identity) => push(
+            findings,
+            PolicySeverity::Blocked,
+            "git_source_changed",
+            &format!(
+                "Git source no longer matches the queued immutable identity ({} verification limitation(s))",
+                identity.limitations.len()
+            ),
+            Some(source.commit.as_str()),
+        ),
+        Err(_) => push(
+            findings,
+            PolicySeverity::Blocked,
+            "git_source_unavailable",
+            "Git source identity could not be revalidated",
+            Some(source.commit.as_str()),
+        ),
     }
 }
 
@@ -220,6 +337,23 @@ fn check_caddy_routes(plan: &DeployPlan, registry: &Registry, findings: &mut Vec
                 "production Caddy route changes require approval",
                 Some(route.host.clone()),
             );
+            if route.tls == "none" {
+                push(
+                    findings,
+                    PolicySeverity::Blocked,
+                    "production_domain_without_tls",
+                    "production managed domains require automatic TLS",
+                    Some(route.host.clone()),
+                );
+            } else {
+                push(
+                    findings,
+                    PolicySeverity::NeedsApproval,
+                    "automatic_tls_change",
+                    "production automatic TLS enrollment requires approval and DNS readiness",
+                    Some(route.host.clone()),
+                );
+            }
         }
 
         check_route_upstream(plan, route, findings);
@@ -231,6 +365,22 @@ fn check_route_upstream(
     route: &PlanCaddyRoute,
     findings: &mut Vec<PolicyFinding>,
 ) {
+    if route.handler == "file_server" {
+        let root = Path::new(&route.upstream);
+        if !root.is_absolute()
+            || has_parent_component(root)
+            || !static_site_destination_allowed(root)
+        {
+            push(
+                findings,
+                PolicySeverity::Blocked,
+                "unsafe_caddy_file_server_root",
+                "Caddy file_server root must be inside an approved static-site root",
+                Some(route.host.clone()),
+            );
+        }
+        return;
+    }
     let Some((host, port)) = parse_upstream(&route.upstream) else {
         push(
             findings,
@@ -376,6 +526,17 @@ fn check_file_changes(plan: &DeployPlan, registry: &Registry, findings: &mut Vec
                         PolicySeverity::NeedsApproval,
                         "typed_caddy_file_write",
                         "production Caddy snippet writes require approval",
+                        Some(typed_write.path.display().to_string()),
+                    );
+                }
+            }
+            "systemd_service" => {
+                if plan.environment == "production" {
+                    push(
+                        findings,
+                        PolicySeverity::NeedsApproval,
+                        "typed_systemd_service_write",
+                        "production managed systemd service writes require approval",
                         Some(typed_write.path.display().to_string()),
                     );
                 }
@@ -604,12 +765,12 @@ fn check_deploy_adapters(plan: &DeployPlan, findings: &mut Vec<PolicyFinding>) {
 
     for (index, unit) in plan.changes.systemd.units.iter().enumerate() {
         let target = format!("changes.systemd.units[{index}]");
-        if !matches!(unit.action.as_str(), "reload" | "restart") {
+        if !matches!(unit.action.as_str(), "reload" | "restart" | "enable") {
             push(
                 findings,
                 PolicySeverity::Blocked,
                 "unsupported_systemd_action",
-                "systemd adapter action must be reload or restart",
+                "systemd adapter action must be reload, restart, or enable",
                 Some(target.clone()),
             );
         }
@@ -646,25 +807,64 @@ fn check_deployment_contract(
         return;
     }
 
-    let Some(service) = deployment_contract_service(plan, registry) else {
-        push(
-            findings,
-            PolicySeverity::Warn,
-            "deployment_contract_unresolved",
-            "production adapter changes are not linked to an existing service deployment contract",
-            Some("service_id"),
-        );
-        return;
-    };
-    let Some(contract) = &service.deployment else {
-        push(
-            findings,
-            PolicySeverity::Blocked,
-            "deployment_contract_missing",
-            "production adapter changes require a deployment contract in services.yml",
-            Some(service.id.as_str()),
-        );
-        return;
+    let registered_service = deployment_contract_service(plan, registry);
+    let contract = match (registered_service, plan.managed_service.as_ref()) {
+        (Some(service), Some(managed)) => {
+            if !managed_contract_matches_registry(service, managed) {
+                push(
+                    findings,
+                    PolicySeverity::Blocked,
+                    "managed_contract_override",
+                    "the compiled managed contract does not exactly match the existing registry contract",
+                    Some(service.id.as_str()),
+                );
+                return;
+            }
+            let Some(contract) = &service.deployment else {
+                push(
+                    findings,
+                    PolicySeverity::Blocked,
+                    "deployment_contract_missing",
+                    "production adapter changes require a deployment contract in services.yml",
+                    Some(service.id.as_str()),
+                );
+                return;
+            };
+            contract
+        }
+        (Some(service), None) => {
+            let Some(contract) = &service.deployment else {
+                push(
+                    findings,
+                    PolicySeverity::Blocked,
+                    "deployment_contract_missing",
+                    "production adapter changes require a deployment contract in services.yml",
+                    Some(service.id.as_str()),
+                );
+                return;
+            };
+            contract
+        }
+        (None, Some(managed)) => {
+            push(
+                findings,
+                PolicySeverity::NeedsApproval,
+                "managed_service_onboarding",
+                "registering a new managed production service and deployment contract requires approval",
+                plan.service_id.as_deref(),
+            );
+            &managed.deployment
+        }
+        (None, None) => {
+            push(
+                findings,
+                PolicySeverity::Warn,
+                "deployment_contract_unresolved",
+                "production adapter changes are not linked to an existing service deployment contract",
+                Some("service_id"),
+            );
+            return;
+        }
     };
 
     for (index, step) in plan.changes.build.steps.iter().enumerate() {
@@ -716,23 +916,30 @@ fn check_deployment_contract(
     }
 
     if plan.changes.migrations.required {
-        let command = plan
-            .changes
-            .migrations
-            .command
-            .as_deref()
-            .unwrap_or_default();
-        if !contract
-            .migrations
-            .iter()
-            .any(|allowed| allowed.as_str() == command)
-        {
+        let declared = if let Some(step) = &plan.changes.migrations.step {
+            contract
+                .migration_adapters
+                .iter()
+                .any(|allowed| allowed.adapter == step.adapter && allowed.script == step.script)
+        } else {
+            let command = plan
+                .changes
+                .migrations
+                .command
+                .as_deref()
+                .unwrap_or_default();
+            contract
+                .migrations
+                .iter()
+                .any(|allowed| allowed.as_str() == command)
+        };
+        if !declared {
             push(
                 findings,
                 PolicySeverity::Blocked,
-                "undeclared_migration_command",
-                "migration command is not declared in the service deployment contract",
-                Some("changes.migrations.command"),
+                "undeclared_migration_adapter",
+                "migration adapter is not declared in the service deployment contract",
+                Some("changes.migrations"),
             );
         }
     }
@@ -770,6 +977,35 @@ fn check_deployment_contract(
             );
         }
     }
+}
+
+fn managed_contract_matches_registry(
+    service: &Service,
+    managed: &crate::plan::PlanManagedService,
+) -> bool {
+    let mut registered_env = service
+        .env_files
+        .iter()
+        .map(|file| &file.path)
+        .collect::<Vec<_>>();
+    let mut managed_env = managed.env_files.iter().collect::<Vec<_>>();
+    registered_env.sort();
+    managed_env.sort();
+    let database_matches = match (&service.database, &managed.database) {
+        (None, None) => true,
+        (Some(registered), Some(compiled)) => {
+            registered.engine == compiled.engine && registered.evidence == compiled.evidence
+        }
+        _ => false,
+    };
+    service.kind == managed.kind
+        && service.deploy_method.as_deref() == Some(managed.deploy_method.as_str())
+        && service.owner.as_deref() == Some(managed.owner.as_str())
+        && registered_env == managed_env
+        && database_matches
+        && service.deployment.as_ref().is_some_and(|deployment| {
+            serde_json::to_value(deployment).ok() == serde_json::to_value(&managed.deployment).ok()
+        })
 }
 
 fn check_destructive_ops(plan: &DeployPlan, findings: &mut Vec<PolicyFinding>) {
@@ -1065,6 +1301,16 @@ fn affected_services<'a>(
     if let Some(service_id) = plan.service_id.as_deref() {
         if let Some(service) = services_by_id.get(service_id) {
             return vec![*service];
+        }
+        if plan.managed_service.is_some() {
+            push(
+                findings,
+                PolicySeverity::NeedsApproval,
+                "managed_service_registry_create",
+                "new managed service registration requires approval before deploy write-back",
+                Some(service_id),
+            );
+            return Vec::new();
         }
         push(
             findings,

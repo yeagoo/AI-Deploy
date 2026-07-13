@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2 - 2026-07-13
+
+- Added fail-closed managed-project compilation for bounded Node/systemd, static-site, and reviewed Compose profiles with immutable Git/source and supply-chain inputs.
+- Added typed domain/TLS, Secret-file, database migration, snapshot, health-controller, and recovery-evidence contracts without exposing Secret values or broadening MCP execution.
+- Added independently approved, constrained automatic delivery for eligible stateless projects and common PostgreSQL, MySQL/MariaDB, and SQLite Node services.
+- Added a trusted Git-push bridge with explicit dry-run qualification, canonical commit/branch validation, immutable queueing, idempotent terminal results, and a packaged production handoff checklist.
+- Kept stateful Compose, unknown runtimes/databases, ambiguous persistence, stale recovery evidence, partial prior attempts, and broad application/data rollback manual-only.
+
 ## 0.6.1 - 2026-07-11
 
 - Added an opt-in, six-hour-capped global-lock wait for reviewed scheduled mutations while preserving fail-fast interactive behavior by default.

@@ -98,15 +98,16 @@ test -f /usr/lib/systemd/system/opsctl-evidence-checkpoint@.timer
 test -f /usr/lib/systemd/system/opsctl-recovery-lab@.service
 test -f /usr/lib/systemd/system/opsctl-recovery-lab@.timer
 test -f /usr/share/opsctl/templates/sudoers.opsctl.example
+test -x /usr/share/opsctl/templates/opsctl-git-push-deliver.sh
+test -f /usr/share/opsctl/templates/opsctl-delivery.env.example
+test -f /usr/share/doc/opsctl/PRODUCTION_DELIVERY_HANDOFF.md
 test -f /usr/share/opsctl/scripts/install-sudoers.sh
 test -f /usr/share/opsctl/scripts/production-onboarding-check.sh
 bash -n /usr/share/opsctl/scripts/production-onboarding-check.sh
-case "$OPSCTL_EXPECTED_VERSION" in
-  0.6.1*)
-    grep -q "Environment=OPSCTL_LOCK_WAIT_SECONDS=21600" /usr/lib/systemd/system/opsctl-backup-run@.service
-    grep -q "FixedRandomDelay=true" /usr/lib/systemd/system/opsctl-backup-run@.timer
-    ;;
-esac
+if dpkg --compare-versions "$OPSCTL_EXPECTED_VERSION" ge 0.6.1; then
+  grep -q "Environment=OPSCTL_LOCK_WAIT_SECONDS=21600" /usr/lib/systemd/system/opsctl-backup-run@.service
+  grep -q "FixedRandomDelay=true" /usr/lib/systemd/system/opsctl-backup-run@.timer
+fi
 
 test "$(stat -c "%a" /srv/server-registry)" = "2750"
 test "$(stat -c "%G" /srv/server-registry)" = "opsctl"

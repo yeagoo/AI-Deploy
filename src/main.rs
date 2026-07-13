@@ -6,6 +6,7 @@ mod backup_schedule;
 mod cleanup_evidence;
 mod cli;
 mod command_runner;
+mod delivery;
 mod deploy;
 mod doctor;
 mod drift;
@@ -15,9 +16,11 @@ mod evidence_backfill;
 mod evidence_crypto;
 mod evidence_retention;
 mod gates;
+mod health_controller;
 mod importer;
 mod install_check;
 mod lockfile;
+mod managed_project;
 mod mcp;
 mod paths;
 mod plan;
@@ -86,8 +89,12 @@ use crate::{
     },
     cli::{
         BackupCommand, BackupTimerCommand, BackupVolumeProtectCommand, Cli, Command, HelperCommand,
-        RegistryCommand, RegistryDriftCleanupRequestCommand, RegistryDriftCommand,
-        RegistryDriftReviewCommand, RegistryPublicDataExceptionCommand,
+        ProjectCommand, ProjectCompileArgs, RegistryCommand, RegistryDriftCleanupRequestCommand,
+        RegistryDriftCommand, RegistryDriftReviewCommand, RegistryPublicDataExceptionCommand,
+    },
+    delivery::{
+        DeliveryOptions, automatic_delivery, plan_delivery_authorization,
+        validate_delivery_authorization_expiry,
     },
     deploy::{
         DeployExecutionOptions, DeployOptions, DeployResumeExecutionOptions, deploy_decision,
@@ -113,12 +120,18 @@ use crate::{
         drift_review_export, drift_service_add, drift_suggest,
     },
     gates::{deploy_gates, deploy_gates_from_reports},
+    health_controller::{
+        HealthControllerOptions, evaluate_health_controller, expected_health_rollback_scope,
+    },
     importer::{
         RegistryImportBuildOptions, RegistryImportWriteOptions, RegistryPromoteImportOptions,
         check_registry_import, promote_registry_import, write_registry_import,
     },
     install_check::check_install,
     lockfile::GlobalLock,
+    managed_project::{
+        GitTriggerOptions, ProjectCompileOptions, compile_project, git_trigger, runtime_profiles,
+    },
     paths::{RuntimePaths, display_path},
     plan::{DraftPlanOptions, draft_deploy_plan, load_deploy_plan, plan_as_yaml},
     policy::{decision_for_status, evaluate_preflight, preflight_exit_code},
@@ -370,6 +383,7 @@ fn execute_command(
         Command::Scan => scan_command(paths),
         Command::CaddyRoutes { adapt, admin } => caddy_routes_command(*adapt, *admin),
         Command::Analyze { project } => analyze_command(project),
+        Command::Project { command } => project_command(paths, command, actor),
         Command::Plan {
             project,
             domain,
@@ -486,6 +500,33 @@ fn execute_command(
             *execute,
             approval_token.as_deref(),
         ),
+        Command::DeployHealthController {
+            plan,
+            journal,
+            dry_run,
+            execute,
+            approval_token,
+        } => deploy_health_controller_command(
+            paths,
+            plan,
+            journal,
+            *dry_run,
+            *execute,
+            approval_token.as_deref(),
+        ),
+        Command::RequestHealthRollback {
+            plan,
+            journal,
+            reason,
+            expires_at,
+        } => request_health_rollback_command(
+            paths,
+            plan,
+            journal,
+            reason,
+            expires_at.as_deref(),
+            actor,
+        ),
         Command::InstallCheck => install_check_command(paths),
         Command::Helper { command } => helper_command(paths, command),
         Command::Tui { dump } => tui_command(paths, *dump, actor),
@@ -527,6 +568,13 @@ fn command_requires_global_lock(command: &Command) -> bool {
             | Command::RequestDeployExecution { .. }
             | Command::RequestDeployResume { .. }
             | Command::DeployResume { execute: true, .. }
+            | Command::DeployHealthController { execute: true, .. }
+            | Command::RequestHealthRollback { .. }
+            | Command::Project {
+                command: ProjectCommand::GitTrigger { execute: true, .. }
+                    | ProjectCommand::AuthorizeDelivery { .. }
+                    | ProjectCommand::Deliver { execute: true, .. },
+            }
             | Command::Helper {
                 command: HelperCommand::RunDeployOperation { .. },
             }
@@ -6284,6 +6332,198 @@ fn analyze_command(project: &std::path::Path) -> Result<CommandOutput> {
     })
 }
 
+fn project_command(
+    paths: &RuntimePaths,
+    command: &ProjectCommand,
+    actor: &str,
+) -> Result<CommandOutput> {
+    match command {
+        ProjectCommand::Profiles => Ok(CommandOutput {
+            json: json!({
+                "read_only": true,
+                "profiles": runtime_profiles(),
+            }),
+            text: "managed profiles: docker_compose, static_site, node_systemd, laravel_systemd"
+                .to_string(),
+            exit_code: 0,
+            audit_decision: "allow",
+            dry_run: true,
+        }),
+        ProjectCommand::Compile { options } => {
+            let registry = Registry::load(&paths.registry_dir)?;
+            let report =
+                compile_project(&project_compile_options(options, actor, Some(&registry)))?;
+            let text = format!(
+                "status: {}\nprofile: {}\nrequired_inputs: {}\nlimitations: {}",
+                report.status,
+                report.selected_profile.as_deref().unwrap_or("none"),
+                report.required_inputs.len(),
+                report.limitations.len()
+            );
+            Ok(CommandOutput {
+                json: serde_json::to_value(&report)
+                    .context("failed to serialize managed project compile report")?,
+                text,
+                exit_code: 0,
+                audit_decision: if report.status == "unsupported" {
+                    "deny"
+                } else {
+                    "allow"
+                },
+                dry_run: true,
+            })
+        }
+        ProjectCommand::GitTrigger {
+            options,
+            commit,
+            branch,
+            execute,
+        } => {
+            let registry = Registry::load(&paths.registry_dir)?;
+            let report = git_trigger(&GitTriggerOptions {
+                compile: project_compile_options(options, actor, Some(&registry)),
+                expected_commit: commit,
+                expected_branch: branch,
+                state_dir: &paths.state_dir,
+                execute: *execute,
+            })?;
+            let text = format!(
+                "status: {}\ntrigger: {}\nsource: {}\nqueued: {}",
+                report.status,
+                report.trigger_id.as_deref().unwrap_or("none"),
+                report.source.status,
+                matches!(report.status.as_str(), "queued" | "already_queued")
+            );
+            Ok(CommandOutput {
+                json: serde_json::to_value(&report)
+                    .context("failed to serialize Git trigger report")?,
+                text,
+                exit_code: if report.ok { 0 } else { 2 },
+                audit_decision: if report.ok { "allow" } else { "deny" },
+                dry_run: !execute,
+            })
+        }
+        ProjectCommand::AuthorizeDelivery {
+            options,
+            commit,
+            branch,
+            reason,
+            expires_at,
+        } => {
+            validate_delivery_authorization_expiry(expires_at.as_deref())?;
+            let registry = Registry::load(&paths.registry_dir)?;
+            let trigger = GitTriggerOptions {
+                compile: project_compile_options(options, actor, Some(&registry)),
+                expected_commit: commit,
+                expected_branch: branch,
+                state_dir: &paths.state_dir,
+                execute: false,
+            };
+            let authorization = plan_delivery_authorization(&trigger, &registry)?;
+            if !authorization.eligible {
+                anyhow::bail!(
+                    "automatic delivery authorization is not eligible: {}",
+                    authorization.blockers.join("; ")
+                );
+            }
+            let plan_id = authorization
+                .plan_id
+                .as_deref()
+                .context("authorization plan is missing plan id")?;
+            let approval = request_approval(&ApprovalRequestOptions {
+                registry_root: &paths.registry_dir,
+                plan_id,
+                requested_by: actor,
+                reason,
+                scope: &authorization.required_scopes,
+                constraints: &authorization.constraints,
+                expires_at: expires_at.as_deref(),
+            })?;
+            Ok(CommandOutput {
+                json: json!({
+                    "decision": "require_approval",
+                    "authorization": authorization,
+                    "approval": approval,
+                    "next_step": "Review and approve this constrained authorization before Git push delivery."
+                }),
+                text: format!(
+                    "approval: {}\nstatus: {}\nclass: {}\nnext: review constraints and approve",
+                    approval.id, approval.status, authorization.delivery_class
+                ),
+                exit_code: 0,
+                audit_decision: "require_approval",
+                dry_run: false,
+            })
+        }
+        ProjectCommand::Deliver {
+            options,
+            commit,
+            branch,
+            dry_run,
+            execute,
+        } => {
+            if dry_run == execute {
+                anyhow::bail!("project deliver requires exactly one of --dry-run or --execute");
+            }
+            let registry = Registry::load(&paths.registry_dir)?;
+            let approvals = list_approvals(&paths.registry_dir)?.approvals;
+            let report = automatic_delivery(&DeliveryOptions {
+                trigger: GitTriggerOptions {
+                    compile: project_compile_options(options, actor, Some(&registry)),
+                    expected_commit: commit,
+                    expected_branch: branch,
+                    state_dir: &paths.state_dir,
+                    execute: *execute,
+                },
+                registry_dir: &paths.registry_dir,
+                registry: &registry,
+                approvals: &approvals,
+                execute: *execute,
+            })?;
+            let success = matches!(
+                report.status.as_str(),
+                "ready" | "completed" | "already_completed"
+            );
+            Ok(CommandOutput {
+                json: serde_json::to_value(&report)?,
+                text: format!(
+                    "status: {}\nclass: {}\ntrigger: {}\nsnapshot: {}\njournal: {}",
+                    report.status,
+                    report.delivery_class,
+                    report.trigger_id.as_deref().unwrap_or("none"),
+                    report.snapshot_id.as_deref().unwrap_or("none"),
+                    report.journal_id.as_deref().unwrap_or("none")
+                ),
+                exit_code: if success { 0 } else { 3 },
+                audit_decision: if success { "allow" } else { "require_approval" },
+                dry_run: *dry_run,
+            })
+        }
+    }
+}
+
+fn project_compile_options<'a>(
+    options: &'a ProjectCompileArgs,
+    actor: &'a str,
+    registry: Option<&'a Registry>,
+) -> ProjectCompileOptions<'a> {
+    ProjectCompileOptions {
+        actor,
+        project: &options.project,
+        profile: &options.profile,
+        service_id: options.service_id.as_deref(),
+        environment: &options.environment,
+        domain: options.domain.as_deref(),
+        tls: &options.tls,
+        port: options.port,
+        runtime_user: options.runtime_user.as_deref(),
+        env_file: options.env_file.as_deref(),
+        systemd_unit: options.systemd_unit.as_deref(),
+        static_destination: options.static_destination.as_deref(),
+        registry,
+    }
+}
+
 fn plan_command(
     project: &Path,
     domain: Option<&str>,
@@ -7096,6 +7336,131 @@ fn deploy_resume_command(
     })
 }
 
+fn deploy_health_controller_command(
+    paths: &RuntimePaths,
+    plan_path: &Path,
+    journal_id: &str,
+    dry_run: bool,
+    execute: bool,
+    approval_token: Option<&str>,
+) -> Result<CommandOutput> {
+    if dry_run == execute {
+        anyhow::bail!("deploy-health-controller requires exactly one of --dry-run or --execute");
+    }
+    let plan = load_deploy_plan(plan_path)?;
+    let approvals = if execute {
+        list_approvals(&paths.registry_dir)?.approvals
+    } else {
+        Vec::new()
+    };
+    let report = evaluate_health_controller(&HealthControllerOptions {
+        state_dir: &paths.state_dir,
+        registry_dir: &paths.registry_dir,
+        plan: &plan,
+        journal_id,
+        execute,
+        approval_token,
+        approvals: &approvals,
+        caddyfile_path: None,
+    })?;
+    let mut lines = vec![
+        format!("status: {}", report.status),
+        format!("eligible: {}", report.eligible),
+        format!("journal: {}", report.journal_id),
+        format!("failed_health_checks: {}", report.failed_health_checks),
+        format!("automatic_scopes: {}", report.automatic_scopes.join(",")),
+    ];
+    if let Some(scope) = &report.approval_scope {
+        lines.push(format!("approval_scope: {scope}"));
+    }
+    if let Some(token) = &report.approval_token {
+        lines.push(format!("approval_token: {token}"));
+    }
+    for blocker in &report.blockers {
+        lines.push(format!("blocker: {blocker}"));
+    }
+    let execution_succeeded =
+        !execute || matches!(report.status.as_str(), "completed" | "already_completed");
+    Ok(CommandOutput {
+        json: serde_json::to_value(&report)?,
+        text: lines.join("\n"),
+        exit_code: if report.eligible && execution_succeeded {
+            0
+        } else {
+            2
+        },
+        audit_decision: if report.eligible && execution_succeeded {
+            "allow"
+        } else {
+            "deny"
+        },
+        dry_run: !execute,
+    })
+}
+
+fn request_health_rollback_command(
+    paths: &RuntimePaths,
+    plan_path: &Path,
+    journal_id: &str,
+    reason: &str,
+    expires_at: Option<&str>,
+    actor: &str,
+) -> Result<CommandOutput> {
+    let plan = load_deploy_plan(plan_path)?;
+    let report = evaluate_health_controller(&HealthControllerOptions {
+        state_dir: &paths.state_dir,
+        registry_dir: &paths.registry_dir,
+        plan: &plan,
+        journal_id,
+        execute: false,
+        approval_token: None,
+        approvals: &[],
+        caddyfile_path: None,
+    })?;
+    if !report.eligible {
+        anyhow::bail!("health rollback approval requires an eligible dry-run");
+    }
+    let token = report
+        .approval_token
+        .as_deref()
+        .context("missing controller token")?;
+    let scope = vec![expected_health_rollback_scope(journal_id)];
+    let constraints = vec![
+        format!("journal_id={journal_id}"),
+        format!(
+            "snapshot_id={}",
+            report.snapshot_id.as_deref().unwrap_or("missing")
+        ),
+        format!("controller_token={token}"),
+        format!("automatic_scopes={}", report.automatic_scopes.join(",")),
+        "execution must use opsctl deploy-health-controller --execute".to_string(),
+    ];
+    let approval = request_approval(&ApprovalRequestOptions {
+        registry_root: &paths.registry_dir,
+        plan_id: &plan.id,
+        requested_by: actor,
+        reason,
+        scope: &scope,
+        constraints: &constraints,
+        expires_at,
+    })?;
+    Ok(CommandOutput {
+        json: json!({
+            "decision": "require_approval",
+            "approval": approval,
+            "controller": report,
+            "controller_token": token,
+        }),
+        text: format!(
+            "approval: {}\nstatus: {}\ncontroller_token: {}",
+            approval.id, approval.status, token
+        ),
+        exit_code: 0,
+        audit_decision: "require_approval",
+        dry_run: false,
+    })
+}
+
 fn install_check_command(paths: &RuntimePaths) -> Result<CommandOutput> {
     let report = check_install(paths);
     let mut lines = vec![
@@ -7405,8 +7770,10 @@ fn command_risk(command_name: &str) -> &'static str {
         | "rollback"
         | "deploy"
         | "deploy-resume"
+        | "deploy-health-controller"
         | "request-deploy-execution"
         | "request-deploy-resume"
+        | "request-health-rollback"
         | "helper"
         | "approve"
         | "reject"
@@ -7436,6 +7803,17 @@ fn command_risk(command_name: &str) -> &'static str {
 
 fn command_risk_for(command: &Command) -> &'static str {
     match command {
+        Command::Project {
+            command:
+                ProjectCommand::GitTrigger { execute: true, .. }
+                | ProjectCommand::AuthorizeDelivery { .. }
+                | ProjectCommand::Deliver { execute: true, .. },
+        } => "high",
+        Command::Project {
+            command:
+                ProjectCommand::GitTrigger { execute: false, .. }
+                | ProjectCommand::Deliver { dry_run: true, .. },
+        } => "medium",
         Command::Registry {
             command:
                 RegistryCommand::ImportProjects { .. }
@@ -7560,6 +7938,16 @@ fn command_risk_for(command: &Command) -> &'static str {
 fn command_audit_target(command: &Command, paths: &RuntimePaths) -> String {
     match command {
         Command::Analyze { project } | Command::Plan { project, .. } => display_path(project),
+        Command::Project {
+            command:
+                ProjectCommand::Compile { options }
+                | ProjectCommand::GitTrigger { options, .. }
+                | ProjectCommand::AuthorizeDelivery { options, .. }
+                | ProjectCommand::Deliver { options, .. },
+        } => display_path(&options.project),
+        Command::Project {
+            command: ProjectCommand::Profiles,
+        } => "managed-project-profiles".to_string(),
         Command::Backup {
             command:
                 BackupCommand::Plan { service_id, .. }
@@ -7711,6 +8099,10 @@ fn command_audit_target(command: &Command, paths: &RuntimePaths) -> String {
             format!("{}#{journal}", display_path(plan))
         }
         Command::DeployResume { plan, journal, .. } => {
+            format!("{}#{journal}", display_path(plan))
+        }
+        Command::DeployHealthController { plan, journal, .. }
+        | Command::RequestHealthRollback { plan, journal, .. } => {
             format!("{}#{journal}", display_path(plan))
         }
         Command::Helper {
@@ -7881,7 +8273,14 @@ fn command_is_dry_run(command: &Command) -> bool {
     matches!(
         command,
         Command::Plan { .. }
+            | Command::Project {
+                command: ProjectCommand::Profiles
+                    | ProjectCommand::Compile { .. }
+                    | ProjectCommand::GitTrigger { execute: false, .. }
+                    | ProjectCommand::Deliver { dry_run: true, .. },
+            }
             | Command::Preflight { .. }
+            | Command::DeployHealthController { dry_run: true, .. }
             | Command::ExplainRisk { .. }
             | Command::DeployGates
             | Command::Backup {

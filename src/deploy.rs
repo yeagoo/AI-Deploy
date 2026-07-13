@@ -9,17 +9,19 @@ use std::{
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
     approvals::{ApprovalFile, approved_scope_for_plan},
-    command_runner::{run_controlled, run_controlled_in_dir},
+    command_runner::{run_controlled, run_controlled_in_dir, run_controlled_with_clean_env_in_dir},
+    managed_project::load_managed_environment,
     paths::display_path,
     plan::DeployPlan,
     policy::{PreflightReport, PreflightStatus, evaluate_preflight},
     redact::redact_value,
     registry::{
-        DomainRecord, DomainsRegistry, PortRecord, PortsRegistry, Registry, Service,
+        DomainRecord, DomainsRegistry, EnvFile, PortRecord, PortsRegistry, Registry, Service,
         ServiceDeploymentContract, ServicesRegistry, VolumeRecord, VolumesRegistry,
     },
     snapshot::{inspect_snapshot_archive_report, verify_snapshot_report},
@@ -113,6 +115,8 @@ pub struct DeployExecutionReport {
     pub journal_id: String,
     pub journal_path: String,
     pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_sha256: Option<String>,
     pub snapshot_id: Option<String>,
     pub status: String,
     pub started_at: String,
@@ -384,6 +388,13 @@ impl DeployOperation {
         self.params.insert(key.into(), value.into());
         self
     }
+
+    fn with_optional_param(mut self, key: impl Into<String>, value: Option<String>) -> Self {
+        if let Some(value) = value {
+            self.params.insert(key.into(), value);
+        }
+        self
+    }
 }
 
 pub fn plan_deploy(options: &DeployOptions<'_>) -> Result<DeployReport> {
@@ -485,14 +496,23 @@ pub fn execute_deploy(options: &DeployExecutionOptions<'_>) -> Result<DeployRepo
             "invalid deploy approval token; rerun deploy --dry-run and use the printed execution_approval_token"
         );
     }
-    if let Some(order) = options.operation_order
-        && report
+    if let Some(order) = options.operation_order {
+        let operation = report
             .operations
             .iter()
             .find(|operation| operation.order == order)
-            .is_some_and(|operation| operation.kind == "ReloadCaddy")
-    {
-        anyhow::bail!("ReloadCaddy requires full deploy execution after ValidateCaddy succeeds");
+            .with_context(|| format!("deploy operation not found: {order}"))?;
+        if !operation.requires_privilege {
+            anyhow::bail!(
+                "privileged helper refuses non-privileged deploy operation {}",
+                operation.kind
+            );
+        }
+        if operation.kind == "ReloadCaddy" {
+            anyhow::bail!(
+                "ReloadCaddy requires full deploy execution after ValidateCaddy succeeds"
+            );
+        }
     }
 
     let execution = run_deploy_operations(
@@ -798,6 +818,11 @@ pub fn resume_deploy_journal(
     })
 }
 
+pub fn deploy_plan_sha256(plan: &DeployPlan) -> Result<String> {
+    let bytes = serde_yaml::to_string(plan)?.into_bytes();
+    Ok(format!("{:x}", Sha256::digest(bytes)))
+}
+
 pub fn execute_deploy_resume(
     options: &DeployResumeExecutionOptions<'_>,
 ) -> Result<DeployResumeReport> {
@@ -1097,60 +1122,68 @@ fn deploy_operations(plan: &DeployPlan) -> Vec<DeployOperation> {
         );
     }
 
-    let has_typed_caddy_file_writes = plan
-        .changes
-        .files
-        .typed
-        .iter()
-        .any(|write| write.kind == "caddy_route_snippet");
-    let has_caddy_changes = !plan.changes.caddy.routes.is_empty()
-        || writes_caddy_config(plan)
-        || has_typed_caddy_file_writes;
-    for route in &plan.changes.caddy.routes {
+    if let Some(install) = plan
+        .supply_chain
+        .as_ref()
+        .and_then(|supply_chain| supply_chain.install.as_ref())
+    {
         builder.push(
             DeployOperation::planned(
-                "WriteCaddyRoute",
-                format!("{} -> {}", route.host, route.upstream),
-                "Prepare a Caddy route update through the privileged helper.",
+                "InstallDependencies",
+                format!("{} frozen install", install.adapter),
+                "Install exactly locked dependencies with lifecycle scripts disabled.",
             )
-            .with_privilege()
-            .with_param("host", route.host.clone())
-            .with_param("upstream", route.upstream.clone()),
+            .with_argv(dependency_install_argv(&install.adapter))
+            .with_working_dir(display_path(&plan.project_root))
+            .with_param("adapter", install.adapter.clone())
+            .with_param("frozen", install.frozen.to_string())
+            .with_param("lifecycle_scripts", install.lifecycle_scripts.to_string())
+            .with_optional_param(
+                "run_as",
+                plan.managed_service
+                    .as_ref()
+                    .map(|service| service.owner.clone()),
+            ),
         );
     }
-    if has_caddy_changes {
+
+    for step in &plan.changes.build.steps {
+        let script = step.script.as_deref().unwrap_or("build");
         builder.push(
             DeployOperation::planned(
-                "ValidateCaddy",
-                "/etc/caddy/Caddyfile",
-                "Validate Caddy configuration before reload.",
+                "RunBuild",
+                format!("{} run {}", step.adapter, script),
+                "Run an allowlisted package-manager build step in the project root.",
             )
-            .with_privilege()
-            .with_argv(vec![
-                "caddy".to_string(),
-                "validate".to_string(),
-                "--config".to_string(),
-                "/etc/caddy/Caddyfile".to_string(),
-            ])
-            .with_param("config", "/etc/caddy/Caddyfile"),
-        );
-        builder.push(
-            DeployOperation::planned(
-                "ReloadCaddy",
-                "caddy.service",
-                "Reload Caddy only after validation succeeds.",
-            )
-            .with_privilege()
-            .with_argv(vec![
-                "systemctl".to_string(),
-                "reload".to_string(),
-                "caddy".to_string(),
-            ])
-            .with_param("unit", "caddy"),
+            .with_argv(build_step_argv(&step.adapter, script))
+            .with_working_dir(display_path(&plan.project_root))
+            .with_param("adapter", step.adapter.clone())
+            .with_param("script", script.to_string())
+            .with_optional_param(
+                "run_as",
+                plan.managed_service
+                    .as_ref()
+                    .map(|service| service.owner.clone()),
+            ),
         );
     }
 
     if let Some(compose_project) = plan.changes.docker.compose_project.as_deref() {
+        if plan.changes.docker.build {
+            let argv = compose_argv(plan, compose_project, &["build"]);
+            builder.push(
+                DeployOperation::planned(
+                    "ComposeBuild",
+                    compose_project.to_string(),
+                    "Build the reviewed Compose project before starting its services.",
+                )
+                .with_privilege()
+                .with_argv(argv)
+                .with_working_dir(display_path(&plan.project_root))
+                .with_param("compose_project", compose_project.to_string()),
+            );
+        }
+        let argv = compose_argv(plan, compose_project, &["up", "-d"]);
         builder.push(
             DeployOperation::planned(
                 "ComposeUp",
@@ -1158,14 +1191,7 @@ fn deploy_operations(plan: &DeployPlan) -> Vec<DeployOperation> {
                 "Run Docker Compose through an explicit project name wrapper.",
             )
             .with_privilege()
-            .with_argv(vec![
-                "docker".to_string(),
-                "compose".to_string(),
-                "--project-name".to_string(),
-                compose_project.to_string(),
-                "up".to_string(),
-                "-d".to_string(),
-            ])
+            .with_argv(argv)
             .with_working_dir(display_path(&plan.project_root))
             .with_param("compose_project", compose_project.to_string()),
         );
@@ -1186,21 +1212,6 @@ fn deploy_operations(plan: &DeployPlan) -> Vec<DeployOperation> {
         );
     }
 
-    for step in &plan.changes.build.steps {
-        let script = step.script.as_deref().unwrap_or("build");
-        builder.push(
-            DeployOperation::planned(
-                "RunBuild",
-                format!("{} run {}", step.adapter, script),
-                "Run an allowlisted package-manager build step in the project root.",
-            )
-            .with_argv(build_step_argv(&step.adapter, script))
-            .with_working_dir(display_path(&plan.project_root))
-            .with_param("adapter", step.adapter.clone())
-            .with_param("script", script.to_string()),
-        );
-    }
-
     for (action, enabled) in laravel_actions(plan) {
         if !enabled {
             continue;
@@ -1213,37 +1224,28 @@ fn deploy_operations(plan: &DeployPlan) -> Vec<DeployOperation> {
             )
             .with_argv(laravel_action_argv(action))
             .with_working_dir(display_path(&plan.project_root))
-            .with_param("artisan_action", action.to_string()),
+            .with_param("artisan_action", action.to_string())
+            .with_optional_param(
+                "run_as",
+                plan.managed_service
+                    .as_ref()
+                    .map(|service| service.owner.clone()),
+            ),
         );
     }
 
-    for unit in &plan.changes.systemd.units {
+    for route in &plan.changes.caddy.routes {
         builder.push(
             DeployOperation::planned(
-                "SystemdService",
-                format!("{} {}", unit.action, unit.unit),
-                "Run an allowlisted systemd service reload/restart through the controlled command runner.",
+                "WriteCaddyRoute",
+                format!("{} -> {}", route.host, route.upstream),
+                "Prepare a Caddy route update through the privileged helper.",
             )
             .with_privilege()
-            .with_argv(vec![
-                "systemctl".to_string(),
-                unit.action.clone(),
-                unit.unit.clone(),
-            ])
-            .with_param("action", unit.action.clone())
-            .with_param("unit", unit.unit.clone()),
-        );
-    }
-
-    if plan.changes.migrations.required {
-        builder.push(
-            DeployOperation::planned(
-                "RunMigration",
-                "changes.migrations.command",
-                "Migration command is intentionally not echoed; approval and redaction are required before execution.",
-            )
-            .with_privilege()
-            .with_working_dir(display_path(&plan.project_root)),
+            .with_param("host", route.host.clone())
+            .with_param("upstream", route.upstream.clone())
+            .with_param("handler", route.handler.clone())
+            .with_param("tls", route.tls.clone()),
         );
     }
 
@@ -1273,6 +1275,101 @@ fn deploy_operations(plan: &DeployPlan) -> Vec<DeployOperation> {
             operation = operation.with_param(format!("param.{key}"), value.clone());
         }
         builder.push(operation);
+    }
+
+    let has_typed_caddy_file_writes = plan
+        .changes
+        .files
+        .typed
+        .iter()
+        .any(|write| write.kind == "caddy_route_snippet");
+    let has_caddy_changes = !plan.changes.caddy.routes.is_empty()
+        || writes_caddy_config(plan)
+        || has_typed_caddy_file_writes;
+    if has_caddy_changes {
+        builder.push(
+            DeployOperation::planned(
+                "ValidateCaddy",
+                "/etc/caddy/Caddyfile",
+                "Validate Caddy configuration after all managed route writes.",
+            )
+            .with_privilege()
+            .with_argv(vec![
+                "caddy".to_string(),
+                "validate".to_string(),
+                "--config".to_string(),
+                "/etc/caddy/Caddyfile".to_string(),
+            ])
+            .with_param("config", "/etc/caddy/Caddyfile"),
+        );
+        builder.push(
+            DeployOperation::planned(
+                "ReloadCaddy",
+                "caddy.service",
+                "Reload Caddy only after post-write validation succeeds.",
+            )
+            .with_privilege()
+            .with_argv(vec![
+                "systemctl".to_string(),
+                "reload".to_string(),
+                "caddy".to_string(),
+            ])
+            .with_param("unit", "caddy"),
+        );
+    }
+
+    if plan
+        .changes
+        .files
+        .typed
+        .iter()
+        .any(|write| write.kind == "systemd_service")
+    {
+        builder.push(
+            DeployOperation::planned(
+                "SystemdDaemonReload",
+                "systemd-manager",
+                "Reload systemd unit metadata after a managed unit write.",
+            )
+            .with_privilege()
+            .with_argv(vec!["systemctl".to_string(), "daemon-reload".to_string()]),
+        );
+    }
+
+    if plan.changes.migrations.required {
+        let mut operation = DeployOperation::planned(
+                "RunMigration",
+                "typed migration adapter",
+                "Run an allowlisted migration adapter as the managed service owner after snapshot and approval gates.",
+            )
+            .with_working_dir(display_path(&plan.project_root))
+            .with_optional_param(
+                "run_as",
+                plan.managed_service
+                    .as_ref()
+                    .map(|service| service.owner.clone()),
+            );
+        if let Some(step) = &plan.changes.migrations.step {
+            operation = operation
+                .with_argv(build_step_argv(&step.adapter, &step.script))
+                .with_param("adapter", step.adapter.clone())
+                .with_param("script", step.script.clone());
+        }
+        builder.push(operation);
+    }
+
+    for unit in &plan.changes.systemd.units {
+        builder.push(
+            DeployOperation::planned(
+                "SystemdService",
+                format!("{} {}", unit.action, unit.unit),
+                "Run an allowlisted systemd service reload/restart through the controlled command runner.",
+            )
+            .with_privilege()
+            .with_argv(systemd_action_argv(&unit.action, &unit.unit))
+            .with_param("action", unit.action.clone())
+            .with_param("unit", unit.unit.clone()),
+        );
     }
 
     if plan.changes.health.enabled {
@@ -1307,6 +1404,29 @@ fn deploy_operations(plan: &DeployPlan) -> Vec<DeployOperation> {
         "Persist registry changes after deploy operations succeed.",
     ));
     builder.finish()
+}
+
+fn compose_argv(plan: &DeployPlan, project: &str, action: &[&str]) -> Vec<String> {
+    let mut argv = vec!["docker".to_string(), "compose".to_string()];
+    if let Some(compose_file) = &plan.changes.docker.compose_file {
+        argv.push("--file".to_string());
+        argv.push(display_path(compose_file));
+    }
+    if let Some(env_file) = &plan.changes.docker.env_file {
+        argv.push("--env-file".to_string());
+        argv.push(display_path(env_file));
+    }
+    argv.extend(["--project-name".to_string(), project.to_string()]);
+    argv.extend(action.iter().map(|value| (*value).to_string()));
+    argv
+}
+
+fn systemd_action_argv(action: &str, unit: &str) -> Vec<String> {
+    vec![
+        "systemctl".to_string(),
+        action.to_string(),
+        unit.to_string(),
+    ]
 }
 
 fn writes_caddy_config(plan: &DeployPlan) -> bool {
@@ -1365,6 +1485,7 @@ fn run_selected_deploy_operations(
         journal_id,
         journal_path: display_path(&journal_path),
         plan_id: plan.id.clone(),
+        plan_sha256: Some(deploy_plan_sha256(plan)?),
         snapshot_id: snapshot_id.map(str::to_string),
         status: "running".to_string(),
         started_at: format_rfc3339(started_at)?,
@@ -1440,8 +1561,15 @@ fn execute_operation(
             "gate already verified before execution".to_string(),
         )),
         "WriteCaddyRoute" => write_caddy_route(operation),
-        "ValidateCaddy" | "ReloadCaddy" | "ComposeUp" | "RunBuild" | "LaravelOptimize"
-        | "SystemdService" => execute_argv_operation(operation),
+        "ValidateCaddy"
+        | "ReloadCaddy"
+        | "ComposeBuild"
+        | "ComposeUp"
+        | "InstallDependencies"
+        | "RunBuild"
+        | "LaravelOptimize"
+        | "SystemdDaemonReload"
+        | "SystemdService" => execute_argv_operation(plan, operation),
         "StaticSiteSync" => execute_static_site_sync(plan, operation),
         "PostDeployHealthCheck" => execute_post_deploy_health_check(plan, operation),
         "WriteRegistry" => apply_registry_writeback(registry_dir, plan)
@@ -1460,6 +1588,22 @@ fn build_step_argv(adapter: &str, script: &str) -> Vec<String> {
     vec![adapter.to_string(), "run".to_string(), script.to_string()]
 }
 
+fn dependency_install_argv(adapter: &str) -> Vec<String> {
+    let values: &[&str] = match adapter {
+        "npm" => &["npm", "ci", "--ignore-scripts", "--no-audit", "--no-fund"],
+        "pnpm" => &[
+            "pnpm",
+            "install",
+            "--frozen-lockfile",
+            "--ignore-scripts",
+            "--reporter=append-only",
+        ],
+        "bun" => &["bun", "install", "--frozen-lockfile", "--ignore-scripts"],
+        _ => &["unsupported"],
+    };
+    values.iter().map(|value| (*value).to_string()).collect()
+}
+
 fn laravel_actions(plan: &DeployPlan) -> [(&'static str, bool); 4] {
     [
         ("optimize", plan.changes.laravel.optimize),
@@ -1473,34 +1617,86 @@ fn laravel_action_argv(action: &str) -> Vec<String> {
     vec!["php".to_string(), "artisan".to_string(), action.to_string()]
 }
 
-fn execute_argv_operation(operation: &DeployOperation) -> Result<DeployOperationResult> {
+fn execute_argv_operation(
+    plan: &DeployPlan,
+    operation: &DeployOperation,
+) -> Result<DeployOperationResult> {
     let Some((program, raw_args)) = operation.argv.split_first() else {
         anyhow::bail!("operation has no argv");
     };
     let program = controlled_program(program);
     let args = normalized_operation_args(operation, raw_args);
+    let (program, args) = run_as_command(operation, program, args)?;
+    let managed_project_command = plan.managed_service.is_some()
+        && matches!(
+            operation.kind.as_str(),
+            "ComposeBuild" | "ComposeUp" | "InstallDependencies" | "RunBuild" | "LaravelOptimize"
+        );
+    let environment = if managed_project_command {
+        plan.managed_service
+            .as_ref()
+            .and_then(|service| service.environment.as_ref())
+            .map(|contract| load_managed_environment(&plan.project_root, contract))
+            .transpose()?
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let output = if let Some(working_dir) = &operation.working_dir {
         let working_dir = safe_working_dir(working_dir)?;
-        run_controlled_in_dir(&program, &args, &working_dir)?
+        if managed_project_command {
+            run_controlled_with_clean_env_in_dir(&program, &args, &environment, &working_dir)?
+        } else {
+            run_controlled_in_dir(&program, &args, &working_dir)?
+        }
+    } else if managed_project_command {
+        run_controlled_with_clean_env_in_dir(&program, &args, &environment, &plan.project_root)?
     } else {
         run_controlled(&program, &args)?
     };
     if output.success() {
-        Ok(success_command_result(
-            operation,
-            output.status_code,
-            output.stdout,
-            output.stderr,
-        ))
+        if managed_project_command {
+            Ok(success_result(
+                operation,
+                "managed command completed; stdout/stderr were not persisted".to_string(),
+            ))
+        } else {
+            Ok(success_command_result(
+                operation,
+                output.status_code,
+                output.stdout,
+                output.stderr,
+            ))
+        }
     } else {
         Ok(failure_result(
             operation,
-            "controlled command exited non-zero".to_string(),
+            if managed_project_command {
+                "managed command exited non-zero; stdout/stderr were not persisted".to_string()
+            } else {
+                "controlled command exited non-zero".to_string()
+            },
             output.status_code,
-            Some(output.stdout),
-            Some(output.stderr),
+            (!managed_project_command).then_some(output.stdout),
+            (!managed_project_command).then_some(output.stderr),
         ))
     }
+}
+
+fn run_as_command(
+    operation: &DeployOperation,
+    program: String,
+    args: Vec<String>,
+) -> Result<(String, Vec<String>)> {
+    let Some(user) = operation.params.get("run_as") else {
+        return Ok((program, args));
+    };
+    validate_systemd_runtime_user(user)?;
+    let runuser =
+        env::var("OPSCTL_RUNUSER_BIN").unwrap_or_else(|_| "/usr/sbin/runuser".to_string());
+    let mut lowered_args = vec!["-u".to_string(), user.clone(), "--".to_string(), program];
+    lowered_args.extend(args);
+    Ok((runuser, lowered_args))
 }
 
 fn normalized_operation_args(operation: &DeployOperation, raw_args: &[String]) -> Vec<String> {
@@ -1539,6 +1735,11 @@ fn execute_post_deploy_health_check(
     plan: &DeployPlan,
     operation: &DeployOperation,
 ) -> Result<DeployOperationResult> {
+    if plan.changes.health.stabilization_seconds > 0 {
+        std::thread::sleep(Duration::from_secs(u64::from(
+            plan.changes.health.stabilization_seconds,
+        )));
+    }
     let mut checks = Vec::new();
 
     if health_category_enabled(plan.changes.health.docker) {
@@ -2286,26 +2487,41 @@ fn execute_migration_operation(
     plan: &DeployPlan,
     operation: &DeployOperation,
 ) -> Result<DeployOperationResult> {
-    let Some(command) = plan.changes.migrations.command.as_deref() else {
-        anyhow::bail!("migration is required but no typed migration command is configured");
+    let (program, args) = if let Some((program, args)) = operation.argv.split_first() {
+        (program.clone(), args.to_vec())
+    } else {
+        let Some(command) = plan.changes.migrations.command.as_deref() else {
+            anyhow::bail!("migration is required but no typed migration adapter is configured");
+        };
+        let (program, args) = allowed_migration_command(command)?;
+        (program.to_string(), args)
     };
-    let (program, args) = allowed_migration_command(command)?;
     let working_dir = safe_working_dir(&display_path(&plan.project_root))?;
-    let output = run_controlled_in_dir(&controlled_program(program), &args, &working_dir)?;
+    let program = controlled_program(&program);
+    let (program, args) = run_as_command(operation, program, args)?;
+    let environment = plan
+        .managed_service
+        .as_ref()
+        .and_then(|service| service.environment.as_ref())
+        .map(|contract| load_managed_environment(&plan.project_root, contract))
+        .transpose()?
+        .unwrap_or_default();
+    let output = run_controlled_with_clean_env_in_dir(&program, &args, &environment, &working_dir)?;
     if output.success() {
-        Ok(success_command_result(
+        Ok(success_result(
             operation,
-            output.status_code,
-            output.stdout,
-            output.stderr,
+            format!(
+                "typed migration completed with exit code {}; command output was not persisted",
+                output.status_code.unwrap_or(0)
+            ),
         ))
     } else {
         Ok(failure_result(
             operation,
-            "migration command exited non-zero".to_string(),
+            "migration command exited non-zero; stdout/stderr were not persisted".to_string(),
             output.status_code,
-            Some(output.stdout),
-            Some(output.stderr),
+            None,
+            None,
         ))
     }
 }
@@ -2377,8 +2593,18 @@ fn write_caddy_route(operation: &DeployOperation) -> Result<DeployOperationResul
         .params
         .get("upstream")
         .context("missing caddy route upstream")?;
+    let tls = operation
+        .params
+        .get("tls")
+        .map_or("automatic", String::as_str);
+    let handler = operation
+        .params
+        .get("handler")
+        .map_or("reverse_proxy", String::as_str);
     validate_caddy_route_value(host, "host")?;
     validate_caddy_route_value(upstream, "upstream")?;
+    validate_caddy_tls_mode(tls)?;
+    validate_caddy_handler(handler, upstream)?;
 
     let path = caddyfile_path();
     ensure_regular_file_or_missing_no_symlink(&path, "Caddyfile")?;
@@ -2398,7 +2624,7 @@ fn write_caddy_route(operation: &DeployOperation) -> Result<DeployOperationResul
     if caddyfile_has_unmanaged_site(&existing, host) {
         anyhow::bail!("refusing to modify unmanaged Caddy route for host {host}");
     }
-    let block = managed_caddy_route_block(host, upstream);
+    let block = managed_caddy_route_block(host, upstream, handler, tls);
     let next = if let Some((start, end)) = managed_caddy_route_bounds(&existing, host)? {
         if existing[start..end] == block {
             return Ok(success_result(
@@ -2434,11 +2660,179 @@ fn execute_typed_file_write(operation: &DeployOperation) -> Result<DeployOperati
     };
     match kind {
         "caddy_route_snippet" => write_caddy_route_snippet(operation),
+        "systemd_service" => write_systemd_service(operation),
         _ => Ok(unsupported_result(
             operation,
             &format!("unsupported typed file write kind: {kind}"),
         )),
     }
+}
+
+fn write_systemd_service(operation: &DeployOperation) -> Result<DeployOperationResult> {
+    let path = operation_param_path(operation, "path")?;
+    let unit = typed_param(operation, "unit")?;
+    if path != Path::new("/etc/systemd/system").join(unit) {
+        anyhow::bail!("systemd_service target must exactly match /etc/systemd/system/<unit>");
+    }
+    validate_systemd_service_unit(unit)?;
+    ensure_typed_write_target(&path, "typed systemd service")?;
+    let content = managed_systemd_service_content(operation)?;
+    if path.exists() {
+        let existing = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        if !existing.contains("# opsctl typed file systemd_service") {
+            anyhow::bail!(
+                "refusing to overwrite unmanaged typed systemd service: {}",
+                path.display()
+            );
+        }
+        if existing == content {
+            return Ok(success_result(
+                operation,
+                "typed systemd service already present".to_string(),
+            ));
+        }
+    }
+    let mode = operation
+        .params
+        .get("mode")
+        .map(|raw| parse_file_mode(raw))
+        .transpose()?
+        .unwrap_or(0o644);
+    if mode != 0o644 {
+        anyhow::bail!("systemd_service mode must be 0644");
+    }
+    write_atomic_with_mode(&path, content.as_bytes(), "typed systemd service", mode)?;
+    Ok(success_result(
+        operation,
+        format!("wrote typed systemd service to {}", path.display()),
+    ))
+}
+
+fn managed_systemd_service_content(operation: &DeployOperation) -> Result<String> {
+    let service_id = typed_param(operation, "service_id")?;
+    let runtime_user = typed_param(operation, "runtime_user")?;
+    let adapter = typed_param(operation, "adapter")?;
+    let start_script = typed_param(operation, "start_script")?;
+    let working_directory = typed_param(operation, "working_directory")?;
+    let env_file = typed_param(operation, "env_file")?;
+    validate_systemd_service_id(service_id)?;
+    validate_systemd_runtime_user(runtime_user)?;
+    validate_systemd_working_directory(working_directory)?;
+    validate_systemd_env_file(env_file)?;
+    validate_systemd_start(adapter, start_script)?;
+    let port = operation
+        .params
+        .get("param.port")
+        .map(|raw| raw.parse::<u16>().context("invalid systemd_service port"))
+        .transpose()?;
+    if port == Some(0) {
+        anyhow::bail!("systemd_service port must not be zero");
+    }
+    let exec_start = if adapter == "php" {
+        let port = port.context("Laravel systemd_service requires a port")?;
+        format!("/usr/bin/env php artisan serve --host=127.0.0.1 --port={port}")
+    } else {
+        format!("/usr/bin/env {adapter} run {start_script}")
+    };
+    let port_environment = port
+        .map(|value| format!("Environment=PORT={value}\n"))
+        .unwrap_or_default();
+    Ok(format!(
+        "# opsctl typed file systemd_service\n[Unit]\nDescription=opsctl managed service {service_id}\nWants=network-online.target\nAfter=network-online.target\n\n[Service]\nType=simple\nUser={runtime_user}\nWorkingDirectory={working_directory}\nEnvironment=NODE_ENV=production\n{port_environment}EnvironmentFile=-{env_file}\nExecStart={exec_start}\nRestart=on-failure\nRestartSec=5s\nTimeoutStartSec=120s\nTimeoutStopSec=30s\nNoNewPrivileges=true\nPrivateTmp=true\nProtectSystem=full\nProtectHome=read-only\nReadWritePaths={working_directory}\n\n[Install]\nWantedBy=multi-user.target\n"
+    ))
+}
+
+fn typed_param<'a>(operation: &'a DeployOperation, key: &str) -> Result<&'a str> {
+    operation
+        .params
+        .get(&format!("param.{key}"))
+        .map(String::as_str)
+        .with_context(|| format!("missing systemd_service param {key}"))
+}
+
+fn validate_systemd_service_unit(unit: &str) -> Result<()> {
+    if unit.is_empty()
+        || unit.len() > 128
+        || !unit.ends_with(".service")
+        || !unit.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '@' | '-' | '_')
+        })
+    {
+        anyhow::bail!("invalid systemd_service unit");
+    }
+    Ok(())
+}
+
+fn validate_systemd_service_id(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 64
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        anyhow::bail!("invalid systemd_service service_id");
+    }
+    Ok(())
+}
+
+fn validate_systemd_runtime_user(value: &str) -> Result<()> {
+    if value.is_empty()
+        || value.len() > 32
+        || value.starts_with('-')
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+    {
+        anyhow::bail!("invalid systemd_service runtime_user");
+    }
+    Ok(())
+}
+
+fn validate_systemd_working_directory(value: &str) -> Result<()> {
+    let path = Path::new(value);
+    if !path.is_absolute()
+        || has_parent_component(path)
+        || value.len() > 4096
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '-' | '_')
+        })
+    {
+        anyhow::bail!("invalid systemd_service working_directory");
+    }
+    Ok(())
+}
+
+fn validate_systemd_env_file(value: &str) -> Result<()> {
+    let path = Path::new(value);
+    if !path.is_absolute()
+        || has_parent_component(path)
+        || value.len() > 4096
+        || !value.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '/' | '.' | '-' | '_')
+        })
+    {
+        anyhow::bail!("invalid systemd_service env_file");
+    }
+    Ok(())
+}
+
+fn validate_systemd_start(adapter: &str, script: &str) -> Result<()> {
+    if !matches!(adapter, "npm" | "pnpm" | "bun" | "php") {
+        anyhow::bail!("invalid systemd_service adapter");
+    }
+    if script.is_empty()
+        || script.len() > 64
+        || !script.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, ':' | '-' | '_')
+        })
+    {
+        anyhow::bail!("invalid systemd_service start_script");
+    }
+    if adapter == "php" && script != "serve" {
+        anyhow::bail!("Laravel systemd_service only supports the serve adapter");
+    }
+    Ok(())
 }
 
 fn write_caddy_route_snippet(operation: &DeployOperation) -> Result<DeployOperationResult> {
@@ -2454,11 +2848,21 @@ fn write_caddy_route_snippet(operation: &DeployOperation) -> Result<DeployOperat
         .params
         .get("param.upstream")
         .context("missing caddy_route_snippet upstream")?;
+    let tls = operation
+        .params
+        .get("param.tls")
+        .map_or("automatic", String::as_str);
+    let handler = operation
+        .params
+        .get("param.handler")
+        .map_or("reverse_proxy", String::as_str);
     validate_caddy_route_value(host, "host")?;
     validate_caddy_route_value(upstream, "upstream")?;
+    validate_caddy_tls_mode(tls)?;
+    validate_caddy_handler(handler, upstream)?;
     ensure_typed_write_target(&path, "typed Caddy snippet")?;
 
-    let content = managed_caddy_snippet_file(host, upstream);
+    let content = managed_caddy_snippet_file(host, upstream, handler, tls);
     if path.exists() {
         let existing = fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
@@ -2488,16 +2892,24 @@ fn write_caddy_route_snippet(operation: &DeployOperation) -> Result<DeployOperat
     ))
 }
 
-fn managed_caddy_route_block(host: &str, upstream: &str) -> String {
-    format!(
-        "# opsctl route begin {host}\n{host} {{\n    reverse_proxy {upstream}\n}}\n# opsctl route end {host}\n"
-    )
+fn managed_caddy_route_block(host: &str, upstream: &str, handler: &str, tls: &str) -> String {
+    let site = if tls == "none" {
+        format!("http://{host}")
+    } else {
+        host.to_string()
+    };
+    let directive = if handler == "file_server" {
+        format!("    root * {upstream}\n    file_server")
+    } else {
+        format!("    reverse_proxy {upstream}")
+    };
+    format!("# opsctl route begin {host}\n{site} {{\n{directive}\n}}\n# opsctl route end {host}\n")
 }
 
-fn managed_caddy_snippet_file(host: &str, upstream: &str) -> String {
+fn managed_caddy_snippet_file(host: &str, upstream: &str, handler: &str, tls: &str) -> String {
     format!(
         "# opsctl typed file caddy_route_snippet\n{}",
-        managed_caddy_route_block(host, upstream)
+        managed_caddy_route_block(host, upstream, handler, tls)
     )
 }
 
@@ -2520,9 +2932,10 @@ fn managed_caddy_route_bounds(existing: &str, host: &str) -> Result<Option<(usiz
 
 fn caddyfile_has_unmanaged_site(existing: &str, host: &str) -> bool {
     let exact = format!("{host} {{");
+    let exact_http = format!("http://{host} {{");
     let managed_bounds = managed_caddy_route_bounds(existing, host).ok().flatten();
     caddy_lines_with_offsets(existing).any(|(offset, line)| {
-        line.trim() == exact
+        matches!(line.trim(), value if value == exact || value == exact_http)
             && !managed_bounds.is_some_and(|bounds| offset_in_bounds(offset, bounds))
     })
 }
@@ -2804,6 +3217,30 @@ fn validate_caddy_route_value(value: &str, label: &str) -> Result<()> {
         anyhow::bail!("invalid caddy route {label}");
     }
     Ok(())
+}
+
+fn validate_caddy_tls_mode(value: &str) -> Result<()> {
+    if !matches!(value, "automatic" | "none") {
+        anyhow::bail!("invalid caddy TLS mode");
+    }
+    Ok(())
+}
+
+fn validate_caddy_handler(handler: &str, upstream: &str) -> Result<()> {
+    match handler {
+        "reverse_proxy" => Ok(()),
+        "file_server" => {
+            let root = Path::new(upstream);
+            if !root.is_absolute()
+                || has_parent_component(root)
+                || !static_site_destination_allowed(root)
+            {
+                anyhow::bail!("invalid managed Caddy file_server root");
+            }
+            Ok(())
+        }
+        _ => anyhow::bail!("invalid managed Caddy handler"),
+    }
 }
 
 fn caddyfile_path() -> PathBuf {
@@ -3760,19 +4197,23 @@ fn update_services_registry(
         return Ok(changed);
     }
 
+    let managed = plan.managed_service.as_ref();
     registry.services.push(Service {
         id: service_id.to_string(),
         name: service_id.to_string(),
         root: Some(plan.project_root.clone()),
-        kind: "unknown".to_string(),
+        kind: managed
+            .map(|service| service.kind.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
         environment: plan.environment.clone(),
-        deploy_method: plan
-            .changes
-            .docker
-            .compose_project
-            .as_ref()
-            .map(|_| "docker-compose".to_string()),
-        owner: None,
+        deploy_method: managed.map(|service| service.deploy_method.clone()).or_else(|| {
+            plan.changes
+                .docker
+                .compose_project
+                .as_ref()
+                .map(|_| "docker-compose".to_string())
+        }),
+        owner: managed.map(|service| service.owner.clone()),
         status: "active".to_string(),
         ports: plan.changes.ports.reserve.clone(),
         domains,
@@ -3780,15 +4221,40 @@ fn update_services_registry(
         containers: plan.changes.docker.containers.clone(),
         volumes: plan.changes.docker.volumes.clone(),
         data_paths: Vec::new(),
-        env_files: Vec::new(),
-        deployment: Some(ServiceDeploymentContract {
-            build: Vec::new(),
-            laravel: None,
-            migrations: Vec::new(),
-            systemd: Vec::new(),
-            static_sites: Vec::new(),
-            notes: Some("Created by deploy write-back; refine this contract before future production updates.".to_string()),
+        env_files: managed
+            .map(|service| {
+                service
+                    .env_files
+                    .iter()
+                    .cloned()
+                    .map(|path| EnvFile {
+                        path,
+                        redaction: "keys_only".to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        database: managed.and_then(|service| {
+            service.database.as_ref().map(|database| crate::registry::ServiceDatabaseContract {
+                engine: database.engine.clone(),
+                evidence: database.evidence.clone(),
+            })
         }),
+        deployment: Some(managed.map_or_else(
+            || ServiceDeploymentContract {
+                build: Vec::new(),
+                laravel: None,
+                migrations: Vec::new(),
+                migration_adapters: Vec::new(),
+                systemd: Vec::new(),
+                static_sites: Vec::new(),
+                notes: Some(
+                    "Created by deploy write-back; refine this contract before future production updates."
+                        .to_string(),
+                ),
+            },
+            |service| service.deployment.clone(),
+        )),
         backup_policy: (plan.environment == "production").then(|| "before_deploy".to_string()),
         notes: Some(format!("Created by opsctl deploy {}.", plan.id)),
     });
@@ -3866,11 +4332,13 @@ fn update_domains_registry(
                 );
             }
             if existing.upstream.as_deref() != Some(route.upstream.as_str())
+                || existing.tls.as_deref() != Some(route.tls.as_str())
                 || existing.status != "active"
             {
                 existing.upstream = Some(route.upstream.clone());
                 existing.status = "active".to_string();
                 existing.caddy_managed = Some(true);
+                existing.tls = Some(route.tls.clone());
                 changed = true;
             }
             continue;
@@ -3889,7 +4357,7 @@ fn update_domains_registry(
             service_id: service_id.to_string(),
             upstream: Some(route.upstream.clone()),
             caddy_managed: Some(true),
-            tls: Some("automatic".to_string()),
+            tls: Some(route.tls.clone()),
             status: "active".to_string(),
             notes: Some("Created by opsctl deploy.".to_string()),
         });
@@ -4368,7 +4836,7 @@ impl OperationBuilder {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs::File, io::Read, path::Path};
+    use std::{fs, fs::File, io::Read, path::Path};
 
     use anyhow::{Context, Result};
     use sha2::{Digest, Sha256};
@@ -4377,12 +4845,107 @@ mod tests {
 
     use crate::{
         approvals::{ApprovalFile, ApprovalRecord, EffectiveApprovalStatus},
+        managed_project::{ProjectCompileOptions, compile_project},
         plan::load_deploy_plan,
         registry::Registry,
         snapshot::{SnapshotManifest, SnapshotOptions, create_snapshot},
     };
 
-    use super::{DeployOptions, DeployStatus, list_deploy_journals, plan_deploy};
+    use super::{
+        DeployOptions, DeployStatus, deploy_operations, list_deploy_journals,
+        managed_caddy_route_block, managed_systemd_service_content, plan_deploy,
+    };
+
+    #[test]
+    fn managed_systemd_deploy_orders_build_write_reload_enable_restart() -> Result<()> {
+        let project = TempDir::new()?;
+        fs::write(
+            project.path().join("package.json"),
+            r#"{"scripts":{"build":"next build","start":"next start","db:migrate":"node migrate.js"},"dependencies":{"next":"16.0.0"}}"#,
+        )?;
+        fs::write(
+            project.path().join("pnpm-lock.yaml"),
+            "lockfileVersion: '9.0'\n",
+        )?;
+        let report = compile_project(&ProjectCompileOptions {
+            actor: "tester",
+            project: project.path(),
+            profile: "node_systemd",
+            service_id: Some("managed-app"),
+            environment: "production",
+            domain: None,
+            tls: "automatic",
+            port: Some(3000),
+            runtime_user: Some("nobody"),
+            env_file: None,
+            systemd_unit: None,
+            static_destination: None,
+            registry: None,
+        })?;
+        let plan = report.deploy_plan.context("managed plan missing")?;
+        let operations = deploy_operations(&plan);
+        let order = |kind: &str, target: Option<&str>| -> Result<usize> {
+            operations
+                .iter()
+                .position(|operation| {
+                    operation.kind == kind
+                        && target.is_none_or(|target| operation.target.contains(target))
+                })
+                .with_context(|| format!("missing operation {kind}"))
+        };
+        let build = order("RunBuild", None)?;
+        let install = order("InstallDependencies", None)?;
+        let write = order("WriteFile", Some("managed-app.service"))?;
+        let daemon_reload = order("SystemdDaemonReload", None)?;
+        let migration = order("RunMigration", None)?;
+        let enable = order("SystemdService", Some("enable managed-app.service"))?;
+        let restart = order("SystemdService", Some("restart managed-app.service"))?;
+        assert!(install < build);
+        assert!(build < write);
+        assert_eq!(
+            operations[install].argv,
+            [
+                "pnpm",
+                "install",
+                "--frozen-lockfile",
+                "--ignore-scripts",
+                "--reporter=append-only"
+            ]
+        );
+        assert!(write < daemon_reload);
+        assert!(daemon_reload < migration);
+        assert!(migration < enable);
+        assert!(enable < restart);
+        assert!(!operations[migration].requires_privilege);
+        assert_eq!(
+            operations[migration]
+                .params
+                .get("run_as")
+                .map(String::as_str),
+            Some("nobody")
+        );
+        assert_eq!(operations[migration].argv, ["pnpm", "run", "db:migrate"]);
+        let content = managed_systemd_service_content(&operations[write])?;
+        assert!(content.contains("# opsctl typed file systemd_service"));
+        assert!(content.contains("ExecStart=/usr/bin/env pnpm run start"));
+        assert!(content.contains("User=nobody"));
+        assert!(!content.contains("sh -c"));
+        Ok(())
+    }
+
+    #[test]
+    fn managed_caddy_file_server_renders_explicit_http_only_site() {
+        let block = managed_caddy_route_block(
+            "static.example.com",
+            "/srv/www/static-app",
+            "file_server",
+            "none",
+        );
+        assert!(block.contains("http://static.example.com {"));
+        assert!(block.contains("root * /srv/www/static-app"));
+        assert!(block.contains("file_server"));
+        assert!(!block.contains("reverse_proxy"));
+    }
 
     #[test]
     fn dry_run_requires_snapshot_for_production_plan() -> Result<()> {

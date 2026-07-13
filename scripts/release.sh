@@ -11,6 +11,8 @@ OUT_DIR="${OPSCTL_RELEASE_OUT:-$ROOT_DIR/target/release-dist/v$VERSION}"
 SKIP_QUALITY="${OPSCTL_RELEASE_SKIP_QUALITY:-0}"
 BUILD_TOOL="${OPSCTL_RELEASE_BUILD_TOOL:-cargo}"
 
+scripts/check-release-identity.sh "v$VERSION" >/dev/null
+
 require_command() {
   if ! command -v "$1" >/dev/null 2>&1; then
     echo "$1 is required" >&2
@@ -31,6 +33,23 @@ require_command cargo
 require_command rustc
 require_command sha256sum
 require_command dpkg-deb
+require_command git
+if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "release packaging requires an authentic Git worktree" >&2
+  exit 1
+fi
+if ! git diff --quiet || ! git diff --cached --quiet || [ -n "$(git ls-files --others --exclude-standard)" ]; then
+  echo "release packaging requires a clean Git worktree" >&2
+  exit 1
+fi
+SOURCE_COMMIT="$(git rev-parse HEAD)"
+case "$SOURCE_COMMIT" in
+  (*[!0-9a-f]*|'') echo "Git returned an invalid source commit" >&2; exit 1 ;;
+esac
+if [ "${#SOURCE_COMMIT}" -ne 40 ] && [ "${#SOURCE_COMMIT}" -ne 64 ]; then
+  echo "Git returned a non-full source commit" >&2
+  exit 1
+fi
 if [ "$BUILD_TOOL" = "cross" ]; then
   require_command cross
 elif [ "$BUILD_TOOL" != "cargo" ]; then
@@ -83,6 +102,8 @@ done
     printf '{\n'
     printf '  "schema_version": "opsctl.release_manifest.v1",\n'
     printf '  "version": "%s",\n' "$VERSION"
+    printf '  "source_commit": "%s",\n' "$SOURCE_COMMIT"
+    printf '  "source_tree": "clean",\n'
     printf '  "build_tool": "%s",\n' "$BUILD_TOOL"
     printf '  "quality": "%s",\n' "$(if [ "$SKIP_QUALITY" = "1" ]; then echo "skipped"; else echo "passed"; fi)"
     printf '  "artifacts": [\n'
@@ -108,6 +129,8 @@ cat > "$OUT_DIR/RELEASE_NOTES.md" <<EOF
 # opsctl v$VERSION
 
 Generated on $(date -u +%Y-%m-%dT%H:%M:%SZ).
+
+Source commit: \`$SOURCE_COMMIT\` from a clean Git worktree.
 
 ## Highlights
 

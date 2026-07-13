@@ -791,6 +791,7 @@ fn import_project(
         volumes: named_volumes.clone(),
         data_paths: vec![root.clone()],
         env_files,
+        database: None,
         deployment: Some(deployment_contract(
             &service_id,
             &root,
@@ -861,10 +862,12 @@ fn add_caddy(
         volumes: Vec::new(),
         data_paths: vec![PathBuf::from("/etc/caddy")],
         env_files: Vec::new(),
+        database: None,
         deployment: Some(ServiceDeploymentContract {
             build: Vec::new(),
             laravel: None,
             migrations: Vec::new(),
+            migration_adapters: Vec::new(),
             systemd: vec![ServiceSystemdContract {
                 unit: "caddy.service".to_string(),
                 actions: vec!["reload".to_string(), "restart".to_string()],
@@ -1173,6 +1176,7 @@ fn deployment_contract(
         build,
         laravel,
         migrations,
+        migration_adapters: Vec::new(),
         systemd,
         static_sites,
         notes: Some(

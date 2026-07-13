@@ -49,7 +49,7 @@ SQLite cache/history for fast lookup
 
 ## Current Status
 
-Current development has completed through Phase 121. The `0.6.1` production-convergence release adds bounded serialization and deterministic spreading for scheduled backup, repository-check, restore-drill, and recovery jobs. Phase 117 qualifies the recovery path with six bounded fault cases. Phase 118 adds current cleanup-request evidence backfill planning and trend records. Phase 119 adds signed retention attestations, restorable signed archives, archive drills, and key disaster-recovery readiness. Phase 120 adds disabled-by-default governance timers and recovery SLO/OpenMetrics. Phase 121 adds volume-level Recovery timelines, read-only MCP views, and 0.5 state compatibility coverage. Automatic approval and destructive Docker volume cleanup remain intentionally unsupported.
+Current development has completed through Phase 121, followed by the managed-delivery convergence work in Phases 10–13. The unpublished `0.6.2` candidate adds bounded project compilation, domain/TLS and Secret contracts, typed database migrations, health control, supply-chain checks, constrained automatic delivery, and the trusted Git-push bridge. The installed production version remains a separate operational fact and must be verified before use. Automatic approval, arbitrary-project execution, destructive Docker volume cleanup, and broad application/data rollback remain intentionally unsupported.
 
 ### Production Database Types
 
@@ -168,6 +168,11 @@ Implemented:
 - `opsctl registry drift ignore [--kind <kind>] [--code <code>] [--target <target>|--target-prefix <prefix>|--target-suffix <suffix>|--target-contains <text>] --reason <reason> --expires-at <RFC3339> [--execute]`
 - `opsctl registry drift adopt [--kind <kind>] --target <target> --service-id <service-id> [--reason <reason>] [--operator-note <note>] [--review-status <status>] [--execute]`
 - `opsctl analyze /path/to/project`
+- `opsctl project profiles`
+- `opsctl project compile /path/to/project [--profile auto] [--service-id <id>] [--runtime-user <user>] [--port <port>]`
+- `opsctl project git-trigger /path/to/project --commit <full-id> --branch <branch> [--execute]`
+- `opsctl project authorize-delivery /path/to/project --commit <full-id> --branch <branch> --reason "..."`
+- `opsctl project deliver /path/to/project --commit <full-id> --branch <branch> (--dry-run|--execute)`
 - `opsctl plan /path/to/project`
 - `opsctl preflight ./deploy-plan.yml`
 - `opsctl explain-risk ./deploy-plan.yml`
@@ -190,6 +195,9 @@ Implemented:
 - `opsctl deploy-resume ./deploy-plan.yml --journal <journal-id> --dry-run`
 - `opsctl request-deploy-resume ./deploy-plan.yml --journal <journal-id> --reason "..."`
 - `opsctl deploy-resume ./deploy-plan.yml --journal <journal-id> --execute --approval-token <token>`
+- `opsctl deploy-health-controller ./deploy-plan.yml --journal <journal-id> --dry-run`
+- `opsctl request-health-rollback ./deploy-plan.yml --journal <journal-id> --reason "..."`
+- `opsctl deploy-health-controller ./deploy-plan.yml --journal <journal-id> --execute --approval-token <token>`
 - `opsctl install-check`
 - `opsctl helper run-deploy-operation ./deploy-plan.yml --operation <n> --snapshot <snapshot-id> --approval-token <token>`
 - `opsctl helper sudoers-check --path /etc/sudoers.d/opsctl-helper`

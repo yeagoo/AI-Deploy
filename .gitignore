@@ -11,6 +11,7 @@
 /progress.md
 /docs/PHASE*_REVIEW.md
 /docs/PRODUCTION_*.md
+!/docs/PRODUCTION_DELIVERY_HANDOFF.md
 
 # Local credentials and environment overrides.
 .env

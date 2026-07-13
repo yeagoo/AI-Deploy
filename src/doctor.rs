@@ -104,7 +104,7 @@ fn check_service_deployment_contracts(registry: &Registry, findings: &mut Vec<Fi
                 });
             }
             for action in &unit.actions {
-                if !matches!(action.as_str(), "reload" | "restart") {
+                if !matches!(action.as_str(), "reload" | "restart" | "enable") {
                     findings.push(Finding {
                         severity: Severity::Error,
                         code: "deployment_contract_unsupported_systemd_action".to_string(),

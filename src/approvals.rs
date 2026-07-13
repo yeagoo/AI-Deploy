@@ -239,6 +239,13 @@ pub fn approved_scope_for_plan(approvals: &[ApprovalFile], plan_id: &str) -> Vec
         .iter()
         .filter(|approval| approval.record.plan_id == plan_id)
         .filter(|approval| {
+            !approval
+                .record
+                .scope
+                .iter()
+                .any(|scope| scope == "automatic_delivery")
+        })
+        .filter(|approval| {
             effective_status(&approval.record, now) == EffectiveApprovalStatus::Approved
         })
         .flat_map(|approval| approval.record.scope.iter().cloned())
@@ -460,8 +467,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{
-        ApprovalRequestOptions, EffectiveApprovalStatus, approve, list_approvals, reject,
-        request_approval,
+        ApprovalRequestOptions, EffectiveApprovalStatus, approve, approved_scope_for_plan,
+        list_approvals, reject, request_approval,
     };
 
     #[test]
@@ -589,6 +596,31 @@ mod tests {
         };
 
         assert!(error.to_string().contains("must be in the future"));
+        Ok(())
+    }
+
+    #[test]
+    fn generic_scope_resolution_excludes_automatic_delivery_authorizations() -> Result<()> {
+        let registry = TempDir::new()?;
+        let approvals_dir = registry.path().join("approvals");
+        fs::create_dir_all(&approvals_dir)?;
+        fs::write(
+            approvals_dir.join("appr_automatic.yml"),
+            r#"id: appr_automatic
+plan_id: deploy_test
+status: approved
+requested_by: operator
+approved_by: reviewer
+expires_at: "2099-01-01T00:00:00Z"
+reason: constrained automatic delivery
+scope:
+  - automatic_delivery
+  - deploy_execution
+"#,
+        )?;
+        let approvals = list_approvals(registry.path())?.approvals;
+
+        assert!(approved_scope_for_plan(&approvals, "deploy_test").is_empty());
         Ok(())
     }
 

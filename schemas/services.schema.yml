@@ -106,6 +106,17 @@ properties:
                 enum:
                   - keys_only
                   - none
+        database:
+          type: object
+          additionalProperties: false
+          required: [engine]
+          properties:
+            engine:
+              enum: [postgres, mysql, mariadb, sqlite, unknown]
+            evidence:
+              type: array
+              items:
+                type: string
         deployment:
           type: object
           additionalProperties: false
@@ -147,6 +158,18 @@ properties:
                 type: string
                 minLength: 1
                 maxLength: 256
+            migration_adapters:
+              type: array
+              items:
+                type: object
+                additionalProperties: false
+                required: [adapter, script]
+                properties:
+                  adapter:
+                    enum: [npm, pnpm, bun]
+                  script:
+                    type: string
+                    pattern: "^[A-Za-z0-9:_-]{1,64}$"
             systemd:
               type: array
               items:
@@ -165,6 +188,7 @@ properties:
                       enum:
                         - reload
                         - restart
+                        - enable
             static_sites:
               type: array
               items:

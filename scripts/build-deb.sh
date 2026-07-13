@@ -34,7 +34,7 @@ install -d -m 0755 "$PKG_DIR/usr/share/opsctl/scripts"
 install -d -m 0755 "$PKG_DIR/usr/lib/systemd/system"
 
 install -m 0755 "$BIN_SRC" "$PKG_DIR/usr/bin/opsctl"
-install -m 0644 README.md docs/DEBIAN_INSTALL.md docs/SECURITY.md "$PKG_DIR/usr/share/doc/opsctl/"
+install -m 0644 README.md docs/DEBIAN_INSTALL.md docs/MANAGED_PROJECTS.md docs/PRODUCTION_DELIVERY_HANDOFF.md docs/SECURITY.md "$PKG_DIR/usr/share/doc/opsctl/"
 cp -R examples/server-registry "$PKG_DIR/usr/share/opsctl/examples-server-registry"
 cp -R schemas "$PKG_DIR/usr/share/opsctl/schemas"
 cp -R templates "$PKG_DIR/usr/share/opsctl/templates"

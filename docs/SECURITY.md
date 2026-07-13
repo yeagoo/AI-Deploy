@@ -9,6 +9,7 @@
 - Human approval remains outside MCP. Use `opsctl approve` or `opsctl reject` from an operator shell.
 - Mutating CLI paths acquire a global lock under the opsctl state directory. This serializes deploy execution, deploy resume execution, helper execution, snapshot creation, rollback stage/restore, backup execution/prune, approval requests, and approval decisions across concurrent AI tools.
 - `opsctl deploy --execute` is CLI-only and only runs opsctl-generated typed operations after a ready dry-run and the printed approval token.
+- `opsctl project deliver --execute` is a CLI-only orchestration path for trusted Git hooks/CI. It requires an independently approved, unexpired `automatic_delivery` authorization whose exact origin, branch, canonical project path, service, environment, Profile, statefulness class, and required scopes match the current immutable trigger. It creates and verifies a complete snapshot before invoking the same typed deploy executor; MCP exposes neither authorization creation nor delivery execution.
 - `opsctl deploy-resume --dry-run` reads a failed deploy journal and reports resumable operations. `opsctl deploy-resume --execute` is CLI-only and requires an approved journal-specific `deploy_resume.<journal_id>` approval record plus the printed resume token.
 - `opsctl rollback --restore` is an operator-only CLI path gated by the approval token printed by `opsctl rollback --dry-run`. MCP does not expose rollback restore.
 - `opsctl install-check`, MCP `install_check`, and `opsctl://install/check` are read-only layout checks.
@@ -194,3 +195,5 @@ The policy engine blocks or requires approval for:
 - unknown change sections
 
 When uncertain, prefer `blocked` or `needs_approval`.
+
+Automatic delivery does not make stateful recovery implicit. Stateless classification rejects database/migration evidence and stateful Compose. Database classification accepts only PostgreSQL, MySQL/MariaDB, and SQLite managed Node contracts with typed migrations and current registered backup, repository check, restore drill, and snapshot readiness. Missing, stale, unsupported, or ambiguous evidence remains manual-only.

@@ -340,6 +340,13 @@ pub struct SnapshotBaselineRecordReport {
 }
 
 pub fn create_snapshot(options: &SnapshotOptions<'_>) -> Result<SnapshotReport> {
+    create_snapshot_with_caddyfile(options, &caddyfile_path())
+}
+
+pub(crate) fn create_snapshot_with_caddyfile(
+    options: &SnapshotOptions<'_>,
+    caddyfile: &Path,
+) -> Result<SnapshotReport> {
     let created_at = OffsetDateTime::now_utc()
         .format(&Rfc3339)
         .context("failed to format snapshot timestamp")?;
@@ -360,7 +367,7 @@ pub fn create_snapshot(options: &SnapshotOptions<'_>) -> Result<SnapshotReport> 
     let preflight = evaluate_preflight(options.plan, options.registry);
     let preflight_status = preflight_status_label(preflight.status);
 
-    if caddyfile_path().exists() {
+    if caddyfile.exists() {
         scope.push("caddy".to_string());
     } else {
         limitations
@@ -500,7 +507,7 @@ pub fn create_snapshot(options: &SnapshotOptions<'_>) -> Result<SnapshotReport> 
             create_directory_archive(Path::new(mountpoint), Path::new(artifact))?;
         }
         if let Some(caddy_config) = artifacts.get("caddy_config") {
-            copy_limited_regular_file(&caddyfile_path(), caddy_config)?;
+            copy_limited_regular_file(caddyfile, caddy_config)?;
         }
         let rollback_plan = rollback_plan(&manifest);
         write_yaml_file(&rollback_plan_path, &rollback_plan)?;
@@ -955,6 +962,29 @@ pub fn rollback_restore(
     restore_config: bool,
     restore_data: bool,
 ) -> Result<RollbackRestoreReport> {
+    rollback_restore_scoped(
+        state_dir,
+        registry_dir,
+        snapshot_id,
+        approval_token,
+        true,
+        restore_config,
+        restore_data,
+        &caddyfile_path(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rollback_restore_scoped(
+    state_dir: &Path,
+    registry_dir: &Path,
+    snapshot_id: &str,
+    approval_token: &str,
+    restore_registry: bool,
+    restore_config: bool,
+    restore_data: bool,
+    caddyfile: &Path,
+) -> Result<RollbackRestoreReport> {
     let dry_run = rollback_dry_run_with_registry(state_dir, snapshot_id, Some(registry_dir))?;
     if approval_token != dry_run.approval_token {
         anyhow::bail!(
@@ -969,9 +999,11 @@ pub fn rollback_restore(
     if !verification.ok {
         anyhow::bail!("rollback restore requires verified snapshot artifacts");
     }
-    let archive = inspect_snapshot_archive_report(state_dir, snapshot_id)?;
-    if !archive.ok {
-        anyhow::bail!("rollback restore requires a safe registry archive");
+    if restore_registry {
+        let archive = inspect_snapshot_archive_report(state_dir, snapshot_id)?;
+        if !archive.ok {
+            anyhow::bail!("rollback restore requires a safe registry archive");
+        }
     }
 
     let snapshot_root = state_dir.join("snapshots").join(snapshot_id);
@@ -996,16 +1028,18 @@ pub fn rollback_restore(
     set_permissions(&backup_dir, 0o700)?;
 
     let mut limitations = Vec::new();
-    let registry_archive = manifest
-        .artifacts
-        .get("registry_archive")
-        .context("snapshot manifest does not declare registry_archive")?;
-    let registry_archive_path = snapshot_artifact_path(&snapshot_root, registry_archive)?;
-    let staged_registry = staging_dir.join("registry");
-    extract_archive_to_directory(&registry_archive_path, &staged_registry)?;
-    let registry_backup = backup_dir.join("registry.tar.zst");
-    create_directory_archive(registry_dir, &registry_backup)?;
-    replace_directory_contents(registry_dir, &staged_registry)?;
+    if restore_registry {
+        let registry_archive = manifest
+            .artifacts
+            .get("registry_archive")
+            .context("snapshot manifest does not declare registry_archive")?;
+        let registry_archive_path = snapshot_artifact_path(&snapshot_root, registry_archive)?;
+        let staged_registry = staging_dir.join("registry");
+        extract_archive_to_directory(&registry_archive_path, &staged_registry)?;
+        let registry_backup = backup_dir.join("registry.tar.zst");
+        create_directory_archive(registry_dir, &registry_backup)?;
+        replace_directory_contents(registry_dir, &staged_registry)?;
+    }
 
     let caddy_config_restored = restore_caddy_config(
         &snapshot_root,
@@ -1013,6 +1047,7 @@ pub fn rollback_restore(
         &backup_dir,
         restore_config,
         &mut limitations,
+        caddyfile,
     )?;
     let volume_archives_restored = restore_volume_archives(
         &snapshot_root,
@@ -1036,7 +1071,7 @@ pub fn rollback_restore(
         restore_data_requested: restore_data,
         staging_dir: display_path(&staging_dir),
         backup_dir: display_path(&backup_dir),
-        registry_restored: true,
+        registry_restored: restore_registry,
         caddy_config_restored,
         volume_archives_restored,
         conflicts: dry_run.conflicts,
@@ -1335,6 +1370,7 @@ fn restore_caddy_config(
     backup_dir: &Path,
     enabled: bool,
     limitations: &mut Vec<String>,
+    destination: &Path,
 ) -> Result<bool> {
     let Some(caddy_artifact) = manifest.artifacts.get("caddy_config") else {
         return Ok(false);
@@ -1347,7 +1383,6 @@ fn restore_caddy_config(
         ));
         return Ok(false);
     }
-    let destination = caddyfile_path();
     let Some(parent) = destination.parent() else {
         limitations.push("Caddyfile destination has no parent directory".to_string());
         return Ok(false);
@@ -1359,8 +1394,8 @@ fn restore_caddy_config(
         ));
         return Ok(false);
     }
-    match optional_regular_file_exists_no_follow(&destination) {
-        Ok(true) => copy_limited_regular_file(&destination, &backup_dir.join("Caddyfile"))?,
+    match optional_regular_file_exists_no_follow(destination) {
+        Ok(true) => copy_limited_regular_file(destination, &backup_dir.join("Caddyfile"))?,
         Ok(false) => {}
         Err(error) => {
             limitations.push(format!(
@@ -1369,7 +1404,7 @@ fn restore_caddy_config(
             return Ok(false);
         }
     }
-    match fs::copy(&source, &destination) {
+    match fs::copy(&source, destination) {
         Ok(_) => Ok(true),
         Err(error) => {
             limitations.push(format!(

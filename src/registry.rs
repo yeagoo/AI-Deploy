@@ -88,6 +88,8 @@ pub struct Service {
     #[serde(default)]
     pub env_files: Vec<EnvFile>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub database: Option<ServiceDatabaseContract>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub deployment: Option<ServiceDeploymentContract>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backup_policy: Option<String>,
@@ -104,6 +106,14 @@ pub struct EnvFile {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ServiceDatabaseContract {
+    pub engine: String,
+    #[serde(default)]
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServiceDeploymentContract {
     #[serde(default)]
     pub build: Vec<ServiceBuildContract>,
@@ -112,11 +122,20 @@ pub struct ServiceDeploymentContract {
     #[serde(default)]
     pub migrations: Vec<String>,
     #[serde(default)]
+    pub migration_adapters: Vec<ServiceMigrationContract>,
+    #[serde(default)]
     pub systemd: Vec<ServiceSystemdContract>,
     #[serde(default)]
     pub static_sites: Vec<ServiceStaticSiteContract>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServiceMigrationContract {
+    pub adapter: String,
+    pub script: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

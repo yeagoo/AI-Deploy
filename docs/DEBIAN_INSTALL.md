@@ -96,7 +96,7 @@ opsctl backup timer install --service-id pcafev2 --execute
 opsctl backup timer status --service-id pcafev2
 ```
 
-The 0.6.1 timer templates deterministically spread each instance across a 23-hour window instead of launching every service in one short cluster. Reviewed scheduled mutations opt into a bounded global-lock queue with `OPSCTL_LOCK_WAIT_SECONDS`; interactive commands remain fail-fast unless an operator explicitly sets that environment variable. The binary rejects waits longer than six hours, and each unit also has a finite systemd start timeout. Do not enable production timers until a read-only repository probe, a generated-object storage smoke test, and `opsctl backup check <repository-id>` all succeed with the intended credential.
+The 0.6.1-and-later timer templates deterministically spread each instance across a 23-hour window instead of launching every service in one short cluster. Reviewed scheduled mutations opt into a bounded global-lock queue with `OPSCTL_LOCK_WAIT_SECONDS`; interactive commands remain fail-fast unless an operator explicitly sets that environment variable. The binary rejects waits longer than six hours, and each unit also has a finite systemd start timeout. Do not enable production timers until a read-only repository probe, a generated-object storage smoke test, and `opsctl backup check <repository-id>` all succeed with the intended credential.
 
 `opsctl-restore-drill@.service` uses `backup drill --scheduled`, which is restricted to `/var/lib/opsctl/restore-drills/<service>` and creates a unique `run-*` staging child for each execution. Operators should prune old staging drill directories after reviewing history and storage use.
 

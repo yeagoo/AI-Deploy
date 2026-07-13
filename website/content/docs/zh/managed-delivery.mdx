@@ -1,0 +1,123 @@
+---
+title: 托管项目与 Git 交付
+description: 把常见 vibe coding 项目编译为受控合同，并创建不可变 Git 交付队列。
+icon: GitBranch
+---
+
+`opsctl project` 把项目静态证据编译为标准运行 Profile、项目合同和现有的 typed deploy plan。它不会把未知项目退化为任意 shell，也不会绕开备份、快照和审批。
+
+## 支持的 Profile
+
+```bash
+opsctl project profiles --json
+```
+
+- `docker_compose`：固定使用分析到的唯一 Compose 文件，再执行受控 build/up；存在命名卷时必须先补齐备份与恢复合同。
+- `static_site`：`npm|pnpm|bun run build` 加有边界、无删除的静态目录同步。
+- `node_systemd`：构建、生成受管 systemd unit、daemon reload、enable、restart 和健康检查。
+- `laravel_systemd`（assisted）：识别受控 Laravel 缓存动作，但在补齐经 review 的 PHP-FPM 或进程运行合约前保持阻断；不会用开发服务器替代生产运行时。
+
+未识别、信息不足或数据归属不明确的项目会返回 `assisted` 或 `unsupported`，不会猜测生产命令。
+
+## 编译项目合同
+
+```bash
+opsctl project compile /srv/projects/example \
+  --service-id example \
+  --runtime-user deploy \
+  --env-file /etc/opsctl/services/example.env \
+  --domain example.com \
+  --tls automatic \
+  --json
+```
+
+输出包括识别证据、Profile、缺失输入、无 Secret 的项目合同，以及状态为 `ready` 时的 typed deploy plan。未声明运行端口时，Node Profile 会在 `20000-29999` 中稳定选择一个不与 Registry 冲突的端口；显式 `--port` 不会被静默改写。
+
+`--tls automatic` 是生产默认值，只接受公共 DNS 主机名并生成受管 Caddy 路由；`--tls none` 用于非生产 HTTP 目标，在 production 会被阻断。静态站点生成限定根目录的 `file_server`，服务型项目生成 localhost reverse proxy。证书是否最终签发属于 Caddy 运行结果，编译阶段不会虚报成功。
+
+`.env*` 只贡献变量名，值不会进入输出、合同、哈希或队列。受管环境文件必须使用源码仓库之外的绝对路径，不能是符号链接，也不能向 group/other 开放权限；赋值必须合法、唯一且非空。每次 preflight/deploy 都会重新验证，因此排队后权限或 key 漂移会 fail-closed。
+
+数据库只根据 Compose image、依赖名称和环境变量名做有限识别。项目声明的 `db:migrate` 或 `migrate` 会编译为 typed package-manager migration。生产数据库必须先在 Registry 中具备当前备份、仓库检查和恢复演练，才可能进入 `ready`。迁移在快照/审批之后、服务重启之前，以受管非 root 用户、无 shell 执行。
+
+首次生产接入会在计划中携带 deployment contract。Preflight 会要求人工审批后才能创建新 Registry 服务；已有服务不能用计划内合同覆盖 Registry 中的合同。
+
+## Git 触发链路
+
+```bash
+opsctl project git-trigger /srv/projects/example \
+  --service-id example \
+  --runtime-user deploy \
+  --env-file /etc/opsctl/services/example.env \
+  --port 3000 \
+  --commit <完整提交ID> \
+  --branch main \
+  --json
+```
+
+它要求：项目路径就是仓库根目录、工作区干净、HEAD 与完整 commit 完全一致、分支完全一致、配置了 origin，并且本地 `origin/<branch>` 引用指向同一 commit。受跟踪符号链接和 Git submodule 会被拒绝，因为其外部内容不能完全由父仓库 commit 锁定。origin URL 只输出 SHA-256 指纹。
+
+命令默认只读。增加 `--execute` 后，只会在 `STATE/git-deliveries/<trigger-id>/` 以 create-new 方式写入 `trigger.json`、`project-contract.yml` 和 `deploy-plan.yml`，不会直接上线。
+
+相同触发只有在 Git 身份和全部文件哈希一致时才返回 `already_queued`；任何篡改都会阻断。
+
+不可变 Git 身份也会写进 queued plan。之后每次 preflight/deploy 都会重新核对工作区、HEAD、分支、origin 指纹和远端分支引用；排队后修改源码会直接阻断。
+
+## 继续进入生产门禁
+
+```bash
+opsctl preflight <队列中的计划> --json
+opsctl snapshot <队列中的计划> --dry-run
+opsctl deploy <队列中的计划> --dry-run --snapshot <snapshot-id> --json
+```
+
+真正执行仍然必须通过 Registry、备份恢复证据、快照、审批、全局锁和 typed deploy executor。
+
+## Git Push 到生产
+
+自动交付不是绕过审批。先基于当前 commit 创建受约束授权请求，再由独立操作员 review 和批准：
+
+```bash
+opsctl project authorize-delivery /srv/projects/example \
+  --service-id example --runtime-user deploy \
+  --env-file /etc/opsctl/services/example.env --port 3000 \
+  --commit <完整提交ID> --branch main \
+  --reason "允许 main 的受控生产交付" \
+  --expires-at 2026-08-01T00:00:00Z --json
+
+opsctl approve <approval-id> --json
+```
+
+授权会绑定 canonical project root、service/plan id、origin 指纹、branch、production 环境、Profile 和 `stateless|database` 类型，同时覆盖当前全部 preflight scope、`automatic_delivery` 与 `deploy_execution`。之后只要 Profile、origin、branch、路径、环境、项目有无状态或新增必要 scope 发生变化，即使授权尚未过期也会阻断。
+
+可信 Git hook 或 CI runner 把工作区和本地 `origin/main` 更新到 pushed commit 后执行：
+
+```bash
+opsctl project deliver /srv/projects/example \
+  --service-id example --runtime-user deploy \
+  --env-file /etc/opsctl/services/example.env --port 3000 \
+  --commit <完整 pushed commit ID> --branch main \
+  --execute --json
+```
+
+Deb 包内的 `templates/opsctl-git-push-deliver.sh` 是该命令的窄桥接模板：只接受规范的小写完整 commit 和配置 branch，以 argv 调用 opsctl，不负责 fetch、checkout、审批或读取 Secret。项目资格验证阶段使用 `OPSCTL_DELIVERY_MODE=dry-run`，只有在精确授权和生产门禁完成评审后才切换为 `execute`。opsctl 会再次验证 clean HEAD、branch、origin 指纹和 `origin/<branch>`，随后完成 immutable queue、完整 snapshot、校验、fresh preflight、typed deploy、health、Registry write-back、audit 和 create-new 结果。相同成功 commit 返回 `already_completed`，失败或 partial 不会被伪装成成功。
+
+无状态自动化要求不存在数据库、migration、Compose named volume 或含糊持久化状态。常见数据库自动化限定为受管 Node 服务的 PostgreSQL、MySQL/MariaDB 和 SQLite，且必须具备 allowlisted `db:migrate|migrate`、当前 backup、repository check、restore drill 与 snapshot readiness；任一证据缺失/过期、未知引擎、stateful Compose 或无 typed migration 都返回 `manual_required`。
+
+## 供应链与构建隔离边界
+
+Node 计划会绑定依赖锁文件的精确 SHA-256，并在 allowlisted build 前执行冻结安装：`npm ci`、`pnpm install --frozen-lockfile` 或 `bun install --frozen-lockfile`。依赖生命周期脚本默认关闭；安装与构建以受管非 root 用户、clean environment 执行，只注入合同要求的环境变量。每次 preflight/deploy 都会重新验证源码和供应链输入。
+
+Compose 计划会同时绑定 Compose 文件和识别到的 Dockerfile。外部 image 与所有非 `scratch` 的 `FROM` 都必须使用 `@sha256:<digest>`；mutable tag、动态基础镜像、privileged、host network、Docker socket 和 root bind mount 会保持 `assisted`。这是有边界的构建收敛，不等同于独立 VM 或断网 builder；依赖下载与 Docker build 仍受运维侧仓库和网络策略约束。
+
+## 健康门禁与受控回滚
+
+生产托管计划启用 typed post-deploy health gate、有限稳定窗口和最多一次回滚。先只读评估失败 journal：
+
+```bash
+opsctl deploy-health-controller ./deploy-plan.yml --journal <journal-id> --dry-run --json
+opsctl request-health-rollback ./deploy-plan.yml --journal <journal-id> --reason "health gate failed"
+# 独立审批通过后
+opsctl deploy-health-controller ./deploy-plan.yml --journal <journal-id> --execute --approval-token <token> --json
+```
+
+Token 精确绑定 plan digest、失败 journal 和 snapshot，执行还要求 journal 专属的 `health_rollback.<journal-id>` 已批准 scope，并以 create-new claim/result 限制为一次。自动范围只包括“计划确实修改且 snapshot 已捕获”的 Caddy 配置。Registry write-back、应用代码或镜像、静态产物、systemd unit、migration 和数据都会返回 `manual_required`，不会虚假声称能恢复未捕获对象，也不会覆盖无关 Registry 变更。MCP 继续只读，不提供 controller execute。

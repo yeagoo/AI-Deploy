@@ -6528,6 +6528,7 @@ pub fn drift_service_add(options: &DriftServiceAddOptions<'_>) -> DriftServiceAd
             .map(|root| vec![root.to_path_buf()])
             .unwrap_or_default(),
         env_files: Vec::new(),
+        database: None,
         deployment: Some(empty_observed_deployment_contract()),
         backup_policy: options
             .backup_policy
@@ -9473,6 +9474,7 @@ fn empty_observed_deployment_contract() -> ServiceDeploymentContract {
         build: Vec::new(),
         laravel: None,
         migrations: Vec::new(),
+        migration_adapters: Vec::new(),
         systemd: Vec::new(),
         static_sites: Vec::new(),
         notes: Some(

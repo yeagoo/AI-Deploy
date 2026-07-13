@@ -37,8 +37,10 @@ run_quality() {
   fi
 
   cargo fmt --check
+  scripts/check-release-identity.sh >/dev/null
   cargo clippy --all-targets --all-features -- -D warnings
   cargo test --all-features
+  scripts/test-managed-delivery-templates.sh
   scripts/test-failure-matrix.sh
   cargo audit
   cargo deny check

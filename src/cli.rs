@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(name = "opsctl")]
@@ -65,6 +65,11 @@ pub enum Command {
     Analyze {
         /// Project directory to inspect.
         project: PathBuf,
+    },
+    /// Compile managed project contracts and queue immutable Git deliveries.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
     },
     /// Generate a minimal draft deploy plan.
     Plan {
@@ -258,6 +263,44 @@ pub enum Command {
         #[arg(long)]
         approval_token: Option<String>,
     },
+    /// Evaluate or execute a bounded rollback after an exact post-deploy health failure.
+    DeployHealthController {
+        /// Deploy plan YAML used for the failed execution.
+        plan: PathBuf,
+
+        /// Exact failed deploy journal id.
+        #[arg(long)]
+        journal: String,
+
+        /// Evaluate rollback eligibility without writing controller state.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Execute the approved covered rollback once.
+        #[arg(long)]
+        execute: bool,
+
+        /// Controller token printed by the dry-run report.
+        #[arg(long)]
+        approval_token: Option<String>,
+    },
+    /// Request human approval for one eligible health-triggered rollback.
+    RequestHealthRollback {
+        /// Deploy plan YAML used for the failed execution.
+        plan: PathBuf,
+
+        /// Exact failed deploy journal id.
+        #[arg(long)]
+        journal: String,
+
+        /// Human reason for allowing the covered automatic rollback.
+        #[arg(long)]
+        reason: String,
+
+        /// Optional RFC3339 approval expiry.
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
     /// Validate installed registry/state layout and permissions.
     InstallCheck,
     /// Run one typed privileged helper operation. Intended for sudoers allowlists.
@@ -310,6 +353,7 @@ impl Command {
             Command::Scan => "scan",
             Command::CaddyRoutes { .. } => "caddy-routes",
             Command::Analyze { .. } => "analyze",
+            Command::Project { .. } => "project",
             Command::Plan { .. } => "plan",
             Command::Preflight { .. } => "preflight",
             Command::ExplainRisk { .. } => "explain-risk",
@@ -327,6 +371,8 @@ impl Command {
             Command::DeployJournals => "deploy-journals",
             Command::DeployJournalInspect { .. } => "deploy-journal-inspect",
             Command::DeployResume { .. } => "deploy-resume",
+            Command::DeployHealthController { .. } => "deploy-health-controller",
+            Command::RequestHealthRollback { .. } => "request-health-rollback",
             Command::InstallCheck => "install-check",
             Command::Helper { .. } => "helper",
             Command::Tui { .. } => "tui",
@@ -337,6 +383,122 @@ impl Command {
             Command::Mcp => "mcp",
         }
     }
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct ProjectCompileArgs {
+    /// Project directory to inspect. It must be the Git repository root for Git triggers.
+    pub project: PathBuf,
+
+    /// Managed runtime profile, or auto to select from bounded detections.
+    #[arg(long, default_value = "auto")]
+    pub profile: String,
+
+    /// Registry service id. Defaults to the normalized project directory name.
+    #[arg(long)]
+    pub service_id: Option<String>,
+
+    /// Deployment environment.
+    #[arg(long, default_value = "production")]
+    pub environment: String,
+
+    /// Primary production domain for reverse-proxy profiles.
+    #[arg(long)]
+    pub domain: Option<String>,
+
+    /// Caddy TLS intent for the managed domain: automatic or none.
+    #[arg(long, default_value = "automatic")]
+    pub tls: String,
+
+    /// Primary runtime or published host port.
+    #[arg(long)]
+    pub port: Option<u16>,
+
+    /// Unix user for generated systemd runtime profiles.
+    #[arg(long)]
+    pub runtime_user: Option<String>,
+
+    /// Absolute operator-managed environment file. Values are never returned.
+    #[arg(long)]
+    pub env_file: Option<PathBuf>,
+
+    /// Exact service unit for generated systemd runtime profiles.
+    #[arg(long)]
+    pub systemd_unit: Option<String>,
+
+    /// Absolute destination for managed static-site sync.
+    #[arg(long)]
+    pub static_destination: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ProjectCommand {
+    /// List the reviewed managed runtime profile catalog.
+    Profiles,
+    /// Compile project evidence into a managed contract and typed deploy plan.
+    Compile {
+        #[command(flatten)]
+        options: ProjectCompileArgs,
+    },
+    /// Verify immutable Git source identity and optionally queue a deploy plan.
+    GitTrigger {
+        #[command(flatten)]
+        options: ProjectCompileArgs,
+
+        /// Exact full Git commit object id expected at HEAD.
+        #[arg(long)]
+        commit: String,
+
+        /// Exact branch allowed to create the production trigger.
+        #[arg(long)]
+        branch: String,
+
+        /// Create an immutable queue record. This does not execute deployment.
+        #[arg(long)]
+        execute: bool,
+    },
+    /// Request a constrained authorization for future automatic deliveries.
+    AuthorizeDelivery {
+        #[command(flatten)]
+        options: ProjectCompileArgs,
+
+        /// Exact full Git commit currently reviewed for the authorization baseline.
+        #[arg(long)]
+        commit: String,
+
+        /// Exact branch allowed to deliver automatically.
+        #[arg(long)]
+        branch: String,
+
+        /// Human reason for granting bounded automatic delivery.
+        #[arg(long)]
+        reason: String,
+
+        /// Optional RFC3339 authorization expiry.
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
+    /// Plan or execute an authorized immutable Git delivery to production.
+    Deliver {
+        #[command(flatten)]
+        options: ProjectCompileArgs,
+
+        /// Exact full commit received from the Git push.
+        #[arg(long)]
+        commit: String,
+
+        /// Exact pushed branch allowed by the authorization.
+        #[arg(long)]
+        branch: String,
+
+        /// Evaluate source, policy, and authorization without writing.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Queue, snapshot, verify, deploy, and record the delivery.
+        #[arg(long)]
+        execute: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]

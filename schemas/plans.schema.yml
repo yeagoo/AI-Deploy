@@ -38,6 +38,123 @@ properties:
       - development
       - external
       - unknown
+  source:
+    type: object
+    additionalProperties: false
+    required:
+      - kind
+      - commit
+      - branch
+      - origin_fingerprint
+    properties:
+      kind:
+        const: git
+      commit:
+        type: string
+        pattern: "^([A-Fa-f0-9]{40}|[A-Fa-f0-9]{64})$"
+      branch:
+        type: string
+        minLength: 1
+        maxLength: 255
+      origin_fingerprint:
+        type: string
+        pattern: "^[a-f0-9]{64}$"
+  managed_service:
+    type: object
+    additionalProperties: false
+    required:
+      - profile
+      - kind
+      - deploy_method
+      - owner
+      - deployment
+    properties:
+      profile:
+        type: string
+        enum:
+          - docker_compose
+          - static_site
+          - node_systemd
+          - laravel_systemd
+      kind:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{1,128}$"
+      deploy_method:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{1,128}$"
+      owner:
+        type: string
+        pattern: "^[A-Za-z0-9_-]{1,128}$"
+      env_files:
+        type: array
+        items:
+          type: string
+      environment:
+        type: object
+        additionalProperties: false
+        required:
+          - file
+          - required_keys
+        properties:
+          file:
+            type: string
+          required_keys:
+            type: array
+            uniqueItems: true
+            items:
+              type: string
+              pattern: "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+      database:
+        type: object
+        additionalProperties: false
+        required:
+          - engine
+          - evidence
+          - backup_status
+        properties:
+          engine:
+            enum: [postgres, mysql, mariadb, sqlite, unknown]
+          evidence:
+            type: array
+            items:
+              type: string
+          backup_status:
+            enum: [ready, required, not_required]
+      deployment:
+        type: object
+  supply_chain:
+    type: object
+    additionalProperties: false
+    required: [inputs, build_isolation]
+    properties:
+      inputs:
+        type: array
+        minItems: 1
+        items:
+          type: object
+          additionalProperties: false
+          required: [kind, path, sha256]
+          properties:
+            kind:
+              enum: [dependency_lockfile, compose, dockerfile]
+            path:
+              type: string
+            sha256:
+              type: string
+              pattern: "^[a-f0-9]{64}$"
+      install:
+        type: object
+        additionalProperties: false
+        required: [adapter, frozen, lifecycle_scripts]
+        properties:
+          adapter:
+            enum: [npm, pnpm, bun]
+          frozen:
+            const: true
+          lifecycle_scripts:
+            const: false
+      build_isolation:
+        enum: [host_nonroot_clean_env, docker_compose_clean_env_reviewed]
   changes:
     type: object
     additionalProperties: true
@@ -46,8 +163,31 @@ properties:
         type: object
       caddy:
         type: object
+        properties:
+          routes:
+            type: array
+            items:
+              type: object
+              additionalProperties: false
+              required: [host, upstream]
+              properties:
+                host:
+                  type: string
+                upstream:
+                  type: string
+                handler:
+                  enum: [reverse_proxy, file_server]
+                tls:
+                  enum: [automatic, none]
       docker:
         type: object
+        properties:
+          build:
+            type: boolean
+          compose_file:
+            type: string
+          env_file:
+            type: string
       static_site:
         type: object
         additionalProperties: false
@@ -83,6 +223,16 @@ properties:
             type: boolean
           static_site:
             type: boolean
+          controller:
+            type: boolean
+          stabilization_seconds:
+            type: integer
+            minimum: 0
+            maximum: 30
+          max_rollback_attempts:
+            type: integer
+            minimum: 0
+            maximum: 1
       build:
         type: object
         additionalProperties: false
@@ -137,6 +287,7 @@ properties:
                   enum:
                     - reload
                     - restart
+                    - enable
       files:
         type: object
         additionalProperties: false
@@ -160,6 +311,7 @@ properties:
                   type: string
                   enum:
                     - caddy_route_snippet
+                    - systemd_service
                 params:
                   type: object
                   additionalProperties:
@@ -180,6 +332,16 @@ properties:
             type: boolean
           command:
             type: string
+          step:
+            type: object
+            additionalProperties: false
+            required: [adapter, script]
+            properties:
+              adapter:
+                enum: [npm, pnpm, bun]
+              script:
+                type: string
+                pattern: "^[A-Za-z0-9:_-]{1,64}$"
       destructive_ops:
         type: array
         items:

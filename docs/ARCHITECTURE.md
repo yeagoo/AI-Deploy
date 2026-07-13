@@ -255,6 +255,23 @@ opsctl preflight
           registry update + audit log
 ```
 
+### Authorized Git Push Flow
+
+```text
+trusted Git/CI runner updates reviewed worktree
+        |
+        v
+exact commit + branch -> opsctl project deliver
+        |
+        +--> immutable Git/source verification
+        +--> constrained automation authorization match
+        +--> current backup/restore/preflight gates
+        +--> complete verified snapshot
+        +--> typed deploy + health + terminal result
+```
+
+opsctl does not expose a public webhook listener or perform repository checkout. The trusted runner owns authentication and worktree update; opsctl independently verifies the resulting commit, branch, origin fingerprint, cleanliness, authorization constraints, and production gates before mutation.
+
 ### Rollback Flow
 
 ```text

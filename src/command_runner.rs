@@ -60,11 +60,7 @@ fn capture_with_dir(
         .stdout
         .take()
         .context("failed to capture command stdout")?;
-    let stdout_reader = thread::spawn(move || {
-        let mut stdout = String::new();
-        let mut reader = stdout_pipe;
-        reader.read_to_string(&mut stdout).map(|_| stdout)
-    });
+    let stdout_reader = thread::spawn(move || read_bounded(stdout_pipe));
 
     let Some(status) = child
         .wait_timeout(READ_ONLY_COMMAND_TIMEOUT)
@@ -139,6 +135,7 @@ pub fn run_controlled_with_input(
         &[],
         Some(input),
         CONTROLLED_COMMAND_TIMEOUT,
+        false,
     )
 }
 
@@ -157,6 +154,23 @@ pub fn run_controlled_with_env_in_dir(
     )
 }
 
+pub fn run_controlled_with_clean_env_in_dir(
+    program: &str,
+    args: &[String],
+    envs: &[(String, OsString)],
+    working_dir: &Path,
+) -> Result<ControlledCommand> {
+    run_controlled_with_dir_env_and_input(
+        program,
+        args,
+        Some(working_dir),
+        envs,
+        None,
+        CONTROLLED_COMMAND_TIMEOUT,
+        true,
+    )
+}
+
 fn run_controlled_with_dir_and_env(
     program: &str,
     args: &[String],
@@ -164,7 +178,7 @@ fn run_controlled_with_dir_and_env(
     envs: &[(String, OsString)],
     timeout: Duration,
 ) -> Result<ControlledCommand> {
-    run_controlled_with_dir_env_and_input(program, args, working_dir, envs, None, timeout)
+    run_controlled_with_dir_env_and_input(program, args, working_dir, envs, None, timeout, false)
 }
 
 fn run_controlled_with_dir_env_and_input(
@@ -174,13 +188,22 @@ fn run_controlled_with_dir_env_and_input(
     envs: &[(String, OsString)],
     input: Option<&[u8]>,
     timeout: Duration,
+    clear_env: bool,
 ) -> Result<ControlledCommand> {
     let mut command = Command::new(program);
     command.args(args);
     if let Some(working_dir) = working_dir {
         command.current_dir(working_dir);
     }
-    if let Some(path) = controlled_path() {
+    if clear_env {
+        command.env_clear();
+        command.env(
+            "PATH",
+            controlled_path().unwrap_or_else(|| {
+                OsString::from("/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
+            }),
+        );
+    } else if let Some(path) = controlled_path() {
         command.env("PATH", path);
     }
     for (name, value) in envs {
@@ -280,9 +303,11 @@ impl ControlledCommand {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeSet, ffi::OsString};
+
     use anyhow::Result;
 
-    use super::run_controlled_in_dir;
+    use super::{run_controlled_in_dir, run_controlled_with_clean_env_in_dir};
 
     #[test]
     fn controlled_command_can_run_in_working_directory() -> Result<()> {
@@ -291,6 +316,23 @@ mod tests {
 
         assert!(captured.success());
         assert_eq!(captured.stdout.trim(), temp.path().display().to_string());
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_clean_environment_contains_only_path_and_injected_keys() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let envs = vec![("DATABASE_URL".to_string(), OsString::from("test-value"))];
+        let captured =
+            run_controlled_with_clean_env_in_dir("/usr/bin/env", &[], &envs, temp.path())?;
+        let names = captured
+            .stdout
+            .lines()
+            .filter_map(|line| line.split_once('=').map(|(name, _)| name))
+            .collect::<BTreeSet<_>>();
+
+        assert!(captured.success());
+        assert_eq!(names, BTreeSet::from(["DATABASE_URL", "PATH"]));
         Ok(())
     }
 }

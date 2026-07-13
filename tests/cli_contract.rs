@@ -2,6 +2,7 @@ use std::{
     io::{Read, Write},
     net::TcpListener,
     path::Path,
+    process::Command as StdCommand,
 };
 
 #[cfg(unix)]
@@ -10371,6 +10372,105 @@ preflight:
 }
 
 #[test]
+fn helper_refuses_non_privileged_build_operation() -> Result<()> {
+    let state_dir = TempDir::new()?;
+    let registry_dir = TempDir::new()?;
+    let project_dir = TempDir::new()?;
+    copy_example_registry(registry_dir.path())?;
+    let plan_path = project_dir.path().join("deploy-helper-build.yml");
+    std::fs::write(
+        &plan_path,
+        format!(
+            r#"id: deploy_helper_build
+actor: tester
+project_root: {}
+intent: deploy
+environment: staging
+changes:
+  build:
+    steps:
+      - adapter: npm
+        script: build
+  destructive_ops: []
+snapshot_required: false
+preflight:
+  status: pending
+"#,
+            project_dir.path().display()
+        ),
+    )?;
+    let state_dir_arg = state_dir.path().to_string_lossy().into_owned();
+    let registry_dir_arg = registry_dir.path().to_string_lossy().into_owned();
+    let plan_arg = plan_path.to_string_lossy().into_owned();
+
+    let dry_run_output = opsctl_cmd()?
+        .args([
+            "--state-dir",
+            &state_dir_arg,
+            "--registry",
+            &registry_dir_arg,
+            "deploy",
+            &plan_arg,
+            "--dry-run",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dry_run_value: Value = serde_json::from_slice(&dry_run_output)?;
+    let token = dry_run_value["data"]["execution_approval_token"]
+        .as_str()
+        .context("deploy dry-run should print execution token")?;
+    let build_order = dry_run_value["data"]["operations"]
+        .as_array()
+        .context("operations should be an array")?
+        .iter()
+        .find(|operation| operation["kind"] == "RunBuild")
+        .and_then(|operation| operation["order"].as_u64())
+        .context("RunBuild order should be present")?
+        .to_string();
+    write_approval(
+        registry_dir.path(),
+        "appr_deploy_helper_build",
+        "deploy_helper_build",
+        "approved",
+        "deploy_execution",
+    )?;
+
+    let failure = opsctl_cmd()?
+        .args([
+            "--state-dir",
+            &state_dir_arg,
+            "--registry",
+            &registry_dir_arg,
+            "helper",
+            "run-deploy-operation",
+            &plan_arg,
+            "--operation",
+            &build_order,
+            "--approval-token",
+            token,
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stdout = String::from_utf8(failure.stdout)?;
+    let stderr = String::from_utf8(failure.stderr)?;
+    assert!(
+        stdout.contains("privileged helper refuses non-privileged deploy operation RunBuild")
+            || stderr
+                .contains("privileged helper refuses non-privileged deploy operation RunBuild"),
+        "unexpected helper failure: stdout={stdout}; stderr={stderr}"
+    );
+
+    Ok(())
+}
+
+#[test]
 fn helper_sudoers_check_validates_helper_policy() -> Result<()> {
     let state_dir = TempDir::new()?;
     let policy_dir = TempDir::new()?;
@@ -13577,4 +13677,485 @@ items:
     assert!(!state.path().join("evidence-backfill.jsonl").exists());
     assert!(!state.path().join("evidence-archive-drills.jsonl").exists());
     Ok(())
+}
+
+#[test]
+fn project_compile_generates_managed_contract_without_secret_values() -> Result<()> {
+    let project = TempDir::new()?;
+    let state = TempDir::new()?;
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"scripts":{"build":"next build","start":"next start"},"dependencies":{"next":"16.0.0"}}"#,
+    )?;
+    std::fs::write(
+        project.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )?;
+    std::fs::write(
+        project.path().join(".env.production"),
+        "SERVICE_TOKEN=never-print-secret\nAPI_TOKEN=also-secret\n",
+    )?;
+    let managed_env = state.path().join("managed.env");
+    std::fs::write(
+        &managed_env,
+        "SERVICE_TOKEN=runtime-secret\nAPI_TOKEN=runtime-token\n",
+    )?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&managed_env, std::fs::Permissions::from_mode(0o600))?;
+    let project_arg = project.path().to_string_lossy().into_owned();
+    let state_arg = state.path().to_string_lossy().into_owned();
+    let env_arg = managed_env.to_string_lossy().into_owned();
+    let runtime_user = test_runtime_user()?;
+
+    let output = opsctl_cmd()?
+        .args([
+            "--state-dir",
+            &state_arg,
+            "project",
+            "compile",
+            &project_arg,
+            "--service-id",
+            "managed-app",
+            "--runtime-user",
+            &runtime_user,
+            "--env-file",
+            &env_arg,
+            "--port",
+            "3000",
+            "--domain",
+            "app.example.com",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&output)?;
+    assert_eq!(value["ok"], true);
+    assert_eq!(value["data"]["status"], "ready");
+    assert_eq!(value["data"]["selected_profile"], "node_systemd");
+    assert_eq!(
+        value["data"]["deploy_plan"]["changes"]["files"]["typed"][0]["kind"],
+        "systemd_service"
+    );
+    assert_eq!(
+        value["data"]["deploy_plan"]["changes"]["systemd"]["units"][0]["action"],
+        "enable"
+    );
+    assert_eq!(
+        value["data"]["deploy_plan"]["changes"]["caddy"]["routes"][0]["tls"],
+        "automatic"
+    );
+    assert_eq!(
+        value["data"]["deploy_plan"]["supply_chain"]["inputs"][0]["kind"],
+        "dependency_lockfile"
+    );
+    assert_eq!(
+        value["data"]["deploy_plan"]["supply_chain"]["install"]["frozen"],
+        true
+    );
+    assert_eq!(
+        value["data"]["deploy_plan"]["supply_chain"]["install"]["lifecycle_scripts"],
+        false
+    );
+    assert_eq!(
+        value["data"]["deploy_plan"]["changes"]["health"]["controller"],
+        true
+    );
+    assert_eq!(
+        value["data"]["deploy_plan"]["changes"]["health"]["max_rollback_attempts"],
+        1
+    );
+    assert_json_array_contains_string(
+        &value["data"]["deploy_plan"]["managed_service"]["environment"]["required_keys"],
+        "SERVICE_TOKEN",
+    )?;
+    let raw = String::from_utf8(output)?;
+    assert!(raw.contains("SERVICE_TOKEN"));
+    assert!(raw.contains("API_TOKEN"));
+    assert!(!raw.contains("never-print-secret"));
+    assert!(!raw.contains("also-secret"));
+    assert!(!raw.contains("runtime-secret"));
+    assert!(!raw.contains("runtime-token"));
+    Ok(())
+}
+
+#[test]
+fn project_compile_database_requires_backup_restore_before_production_migration() -> Result<()> {
+    let project = TempDir::new()?;
+    let state = TempDir::new()?;
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"scripts":{"build":"next build","start":"next start","db:migrate":"prisma migrate deploy"},"dependencies":{"next":"16.0.0","pg":"8.0.0"}}"#,
+    )?;
+    std::fs::write(
+        project.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )?;
+    std::fs::write(
+        project.path().join(".env.example"),
+        "DATABASE_URL=example\n",
+    )?;
+    let managed_env = state.path().join("database.env");
+    std::fs::write(&managed_env, "DATABASE_URL=runtime-secret\n")?;
+    #[cfg(unix)]
+    std::fs::set_permissions(&managed_env, std::fs::Permissions::from_mode(0o600))?;
+    let project_arg = project.path().to_string_lossy().into_owned();
+    let state_arg = state.path().to_string_lossy().into_owned();
+    let env_arg = managed_env.to_string_lossy().into_owned();
+    let runtime_user = test_runtime_user()?;
+
+    let output = opsctl_cmd()?
+        .args([
+            "--state-dir",
+            &state_arg,
+            "--registry",
+            "examples/server-registry",
+            "project",
+            "compile",
+            &project_arg,
+            "--service-id",
+            "database-app",
+            "--runtime-user",
+            &runtime_user,
+            "--env-file",
+            &env_arg,
+            "--domain",
+            "database-app.example.com",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&output)?;
+    assert_eq!(value["data"]["status"], "assisted");
+    assert_eq!(value["data"]["contract"]["database"]["engine"], "postgres");
+    assert_eq!(value["data"]["contract"]["migration"]["adapter"], "pnpm");
+    assert!(
+        value["data"]["required_inputs"]
+            .as_array()
+            .is_some_and(|inputs| inputs
+                .iter()
+                .any(|value| { value.as_str().is_some_and(|value| value.contains("backup")) }))
+    );
+    let raw = String::from_utf8(output)?;
+    assert!(!raw.contains("runtime-secret"));
+    Ok(())
+}
+
+#[test]
+fn project_git_trigger_is_dry_run_by_default_and_idempotently_queues() -> Result<()> {
+    let project = TempDir::new()?;
+    let state = TempDir::new()?;
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"scripts":{"build":"next build","start":"next start"},"dependencies":{"next":"16.0.0"}}"#,
+    )?;
+    std::fs::write(
+        project.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )?;
+    run_git(project.path(), &["init", "-b", "main"])?;
+    run_git(
+        project.path(),
+        &["config", "user.email", "tester@example.com"],
+    )?;
+    run_git(project.path(), &["config", "user.name", "Tester"])?;
+    run_git(project.path(), &["add", "."])?;
+    run_git(project.path(), &["commit", "-m", "initial"])?;
+    run_git(
+        project.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/org/repo.git",
+        ],
+    )?;
+    let commit = git_output(project.path(), &["rev-parse", "HEAD"])?;
+    run_git(
+        project.path(),
+        &["update-ref", "refs/remotes/origin/main", &commit],
+    )?;
+    let project_arg = project.path().to_string_lossy().into_owned();
+    let state_arg = state.path().to_string_lossy().into_owned();
+    let runtime_user = test_runtime_user()?;
+    let args = [
+        "--state-dir",
+        &state_arg,
+        "project",
+        "git-trigger",
+        &project_arg,
+        "--service-id",
+        "managed-app",
+        "--runtime-user",
+        &runtime_user,
+        "--port",
+        "3000",
+        "--commit",
+        &commit,
+        "--branch",
+        "main",
+        "--json",
+    ];
+
+    let dry_output = opsctl_cmd()?
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let dry: Value = serde_json::from_slice(&dry_output)?;
+    assert_eq!(dry["data"]["status"], "ready");
+    assert_eq!(dry["data"]["read_only"], true);
+    assert!(!state.path().join("git-deliveries").exists());
+
+    let mut execute_args = args.to_vec();
+    execute_args.insert(execute_args.len() - 1, "--execute");
+    let queued_output = opsctl_cmd()?
+        .args(&execute_args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let queued: Value = serde_json::from_slice(&queued_output)?;
+    assert_eq!(queued["data"]["status"], "queued");
+    let queue_dir = queued["data"]["queue_dir"]
+        .as_str()
+        .context("queue_dir missing")?;
+    assert!(Path::new(queue_dir).join("trigger.json").is_file());
+    assert!(Path::new(queue_dir).join("deploy-plan.yml").is_file());
+    assert!(Path::new(queue_dir).join("project-contract.yml").is_file());
+
+    let duplicate_output = opsctl_cmd()?
+        .args(&execute_args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let duplicate: Value = serde_json::from_slice(&duplicate_output)?;
+    assert_eq!(duplicate["data"]["status"], "already_queued");
+    assert_eq!(duplicate["data"]["idempotent"], true);
+
+    std::fs::write(
+        project.path().join("uncommitted.txt"),
+        "changed after queue\n",
+    )?;
+    let queued_plan = Path::new(queue_dir).join("deploy-plan.yml");
+    let queued_plan_arg = queued_plan.to_string_lossy().into_owned();
+    let preflight_output = opsctl_cmd()?
+        .args([
+            "--state-dir",
+            &state_arg,
+            "--registry",
+            "examples/server-registry",
+            "preflight",
+            &queued_plan_arg,
+            "--json",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let preflight: Value = serde_json::from_slice(&preflight_output)?;
+    assert_eq!(preflight["data"]["status"], "blocked");
+    assert!(
+        preflight["data"]["findings"]
+            .as_array()
+            .is_some_and(|findings| findings.iter().any(|finding| {
+                finding["code"] == "git_source_changed"
+                    || finding["code"] == "git_source_unavailable"
+            }))
+    );
+    Ok(())
+}
+
+#[test]
+fn project_delivery_requires_then_accepts_exact_constrained_authorization() -> Result<()> {
+    let project = TempDir::new()?;
+    let state = TempDir::new()?;
+    let registry = TempDir::new()?;
+    copy_example_registry(registry.path())?;
+    std::fs::write(
+        project.path().join("package.json"),
+        r#"{"scripts":{"build":"next build","start":"next start"},"dependencies":{"next":"16.0.0"}}"#,
+    )?;
+    std::fs::write(
+        project.path().join("pnpm-lock.yaml"),
+        "lockfileVersion: '9.0'\n",
+    )?;
+    run_git(project.path(), &["init", "-b", "main"])?;
+    run_git(
+        project.path(),
+        &["config", "user.email", "tester@example.com"],
+    )?;
+    run_git(project.path(), &["config", "user.name", "Tester"])?;
+    run_git(project.path(), &["add", "."])?;
+    run_git(project.path(), &["commit", "-m", "initial"])?;
+    run_git(
+        project.path(),
+        &[
+            "remote",
+            "add",
+            "origin",
+            "https://example.com/org/automatic-delivery.git",
+        ],
+    )?;
+    let commit = git_output(project.path(), &["rev-parse", "HEAD"])?;
+    run_git(
+        project.path(),
+        &["update-ref", "refs/remotes/origin/main", &commit],
+    )?;
+    let project_arg = project.path().to_string_lossy().into_owned();
+    let state_arg = state.path().to_string_lossy().into_owned();
+    let registry_arg = registry.path().to_string_lossy().into_owned();
+    let runtime_user = test_runtime_user()?;
+    let common = [
+        "--state-dir",
+        &state_arg,
+        "--registry",
+        &registry_arg,
+        "project",
+        "deliver",
+        &project_arg,
+        "--service-id",
+        "automatic-app",
+        "--runtime-user",
+        &runtime_user,
+        "--port",
+        "3099",
+        "--commit",
+        &commit,
+        "--branch",
+        "main",
+        "--dry-run",
+        "--json",
+    ];
+    let unauthorized_output = opsctl_cmd()?
+        .args(common)
+        .assert()
+        .code(3)
+        .get_output()
+        .stdout
+        .clone();
+    let unauthorized: Value = serde_json::from_slice(&unauthorized_output)?;
+    assert_eq!(unauthorized["data"]["status"], "authorization_required");
+    assert_eq!(unauthorized["data"]["delivery_class"], "stateless");
+    assert!(!state.path().join("git-deliveries").exists());
+
+    let authorization_output = opsctl_cmd()?
+        .args([
+            "--state-dir",
+            &state_arg,
+            "--registry",
+            &registry_arg,
+            "--actor",
+            "operator",
+            "project",
+            "authorize-delivery",
+            &project_arg,
+            "--service-id",
+            "automatic-app",
+            "--runtime-user",
+            &runtime_user,
+            "--port",
+            "3099",
+            "--commit",
+            &commit,
+            "--branch",
+            "main",
+            "--reason",
+            "reviewed automatic stateless delivery",
+            "--expires-at",
+            "2026-08-01T00:00:00Z",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let authorization: Value = serde_json::from_slice(&authorization_output)?;
+    assert_eq!(
+        authorization["data"]["authorization"]["delivery_class"],
+        "stateless"
+    );
+    assert_json_array_contains_string(
+        &authorization["data"]["authorization"]["required_scopes"],
+        "automatic_delivery",
+    )?;
+    assert_json_array_contains_string(
+        &authorization["data"]["authorization"]["required_scopes"],
+        "typed_systemd_service_write",
+    )?;
+    let approval_id = authorization["data"]["approval"]["id"]
+        .as_str()
+        .context("authorization approval id missing")?;
+    opsctl_cmd()?
+        .args([
+            "--state-dir",
+            &state_arg,
+            "--registry",
+            &registry_arg,
+            "--actor",
+            "reviewer",
+            "approve",
+            approval_id,
+            "--json",
+        ])
+        .assert()
+        .success();
+
+    let authorized_output = opsctl_cmd()?
+        .args(common)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let authorized: Value = serde_json::from_slice(&authorized_output)?;
+    assert_eq!(authorized["data"]["status"], "ready");
+    assert_eq!(authorized["data"]["authorization_id"], approval_id);
+    assert!(!state.path().join("git-deliveries").exists());
+    Ok(())
+}
+
+fn run_git(root: &Path, args: &[&str]) -> Result<()> {
+    let status = StdCommand::new("git")
+        .args(args)
+        .current_dir(root)
+        .status()?;
+    if !status.success() {
+        anyhow::bail!("git command failed");
+    }
+    Ok(())
+}
+
+fn git_output(root: &Path, args: &[&str]) -> Result<String> {
+    let output = StdCommand::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()?;
+    if !output.status.success() {
+        anyhow::bail!("git command failed");
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_string())
+}
+
+fn test_runtime_user() -> Result<String> {
+    let raw = std::fs::read_to_string("/etc/passwd")?;
+    raw.lines()
+        .find_map(|line| {
+            let fields = line.split(':').collect::<Vec<_>>();
+            (fields.len() >= 3 && fields[2].parse::<u32>().ok().is_some_and(|uid| uid > 0))
+                .then(|| fields[0].to_string())
+        })
+        .context("no non-root test user found")
 }

@@ -1,0 +1,123 @@
+---
+title: Managed projects and Git delivery
+description: Compile common vibe-coded projects into controlled contracts and immutable Git delivery queues.
+icon: GitBranch
+---
+
+`opsctl project` compiles static project evidence into a standard runtime profile, a managed project contract, and the existing typed deploy plan. It never falls back to arbitrary shell for unknown projects and never bypasses backup, snapshot, or approval gates.
+
+## Managed profiles
+
+```bash
+opsctl project profiles --json
+```
+
+- `docker_compose`: pins the one analyzed Compose file before controlled build/up; named volumes require a registered backup and restore contract first.
+- `static_site`: `npm|pnpm|bun run build` plus bounded no-delete static synchronization.
+- `node_systemd`: build, managed systemd unit generation, daemon reload, enable, restart, and health checks.
+- `laravel_systemd` (assisted): detects typed Laravel cache actions but remains blocked until a reviewed PHP-FPM or process runtime contract exists; it never substitutes the development server for production.
+
+Unknown, incomplete, or data-ambiguous projects return `assisted` or `unsupported`; production commands are never guessed.
+
+## Compile a project contract
+
+```bash
+opsctl project compile /srv/projects/example \
+  --service-id example \
+  --runtime-user deploy \
+  --env-file /etc/opsctl/services/example.env \
+  --domain example.com \
+  --tls automatic \
+  --json
+```
+
+The report contains detection evidence, the selected profile, missing inputs, a secret-free project contract, and a typed deploy plan when status is `ready`. If no runtime port is declared, Node profiles choose a stable non-conflicting Registry port in `20000-29999`; an explicit `--port` is never silently changed.
+
+`--tls automatic` is the production default. It requires a public DNS hostname and generates a managed Caddy route. `--tls none` is for non-production HTTP targets and is blocked in production. Static profiles generate an allowlisted `file_server` root, while service profiles generate a localhost reverse proxy. Certificate issuance remains a Caddy runtime result and is never claimed at compile time.
+
+`.env*` files contribute names only; values never enter output, contracts, hashes, or queues. A managed environment file must use an absolute path outside the source repository, must not be a symlink, and must deny group/other access. Assignments must be valid, unique, and non-empty. Every preflight/deploy revalidates the file, so permission or key drift after queueing fails closed.
+
+Database evidence is inferred only from Compose images, dependency names, and environment key names. Declared `db:migrate` or `migrate` scripts compile to a typed package-manager migration. Production database plans require current registered backup, repository-check, and restore-drill readiness. Migrations run after snapshot/approval gates and before service restart, as the managed non-root owner, without a shell.
+
+First production onboarding carries a deployment contract in the plan. Preflight requires human approval before creating the new Registry service. An existing service cannot be overridden by a plan-embedded contract.
+
+## Git trigger chain
+
+```bash
+opsctl project git-trigger /srv/projects/example \
+  --service-id example \
+  --runtime-user deploy \
+  --env-file /etc/opsctl/services/example.env \
+  --port 3000 \
+  --commit <full-commit-id> \
+  --branch main \
+  --json
+```
+
+The project must be the repository root, the worktree must be clean, HEAD must equal the full commit, the branch must match exactly, origin must be configured, and the local `origin/<branch>` reference must point to the same commit. Tracked symbolic links and Git submodules are rejected because their external content is not fully bound by the parent commit. Only a SHA-256 fingerprint of the origin URL is returned.
+
+The command is read-only by default. With `--execute`, it only writes create-new `trigger.json`, `project-contract.yml`, and `deploy-plan.yml` files under `STATE/git-deliveries/<trigger-id>/`; it does not deploy.
+
+The same trigger returns `already_queued` only when Git identity and every stored artifact hash still match. Tampering fails closed.
+
+The immutable Git identity is embedded in the queued plan. Every later preflight and deploy rechecks the worktree, HEAD, branch, origin fingerprint, and remote branch reference. A source change after queueing blocks execution.
+
+## Continue through production gates
+
+```bash
+opsctl preflight <queued-plan> --json
+opsctl snapshot <queued-plan> --dry-run
+opsctl deploy <queued-plan> --dry-run --snapshot <snapshot-id> --json
+```
+
+Execution still requires Registry policy, backup and restore evidence, snapshot verification, approvals, the global lock, and the typed deploy executor.
+
+## Git push to production
+
+Automatic delivery does not bypass approval. Create a constrained authorization request from the current commit, then have an independent operator review and approve it:
+
+```bash
+opsctl project authorize-delivery /srv/projects/example \
+  --service-id example --runtime-user deploy \
+  --env-file /etc/opsctl/services/example.env --port 3000 \
+  --commit <full-commit-id> --branch main \
+  --reason "allow bounded production delivery from main" \
+  --expires-at 2026-08-01T00:00:00Z --json
+
+opsctl approve <approval-id> --json
+```
+
+The authorization binds the canonical project root, service/plan id, origin fingerprint, branch, production environment, Profile, and `stateless|database` class. It covers all current preflight scopes plus `automatic_delivery` and `deploy_execution`. A later Profile, origin, branch, path, environment, statefulness-class, or newly required scope change blocks reuse even before expiry.
+
+After a trusted Git hook or CI runner updates the worktree and local `origin/main` ref to the pushed commit, it invokes:
+
+```bash
+opsctl project deliver /srv/projects/example \
+  --service-id example --runtime-user deploy \
+  --env-file /etc/opsctl/services/example.env --port 3000 \
+  --commit <full-pushed-commit-id> --branch main \
+  --execute --json
+```
+
+The Debian package includes `templates/opsctl-git-push-deliver.sh` as a narrow bridge. It accepts only a canonical lowercase full commit and the configured branch, invokes opsctl with argv, and performs no fetch, checkout, approval, or secret lookup. Use `OPSCTL_DELIVERY_MODE=dry-run` during qualification and switch to `execute` only after the exact authorization and production gates have been reviewed. Opsctl independently rechecks clean HEAD, branch, origin fingerprint, and `origin/<branch>`, then performs immutable queueing, a complete snapshot, verification, fresh preflight, typed deploy, health, Registry write-back, audit, and a create-new result. Repeating the same successful commit returns `already_completed`; failed or partial attempts are never reported as success.
+
+Stateless automation requires no database, migration, Compose named volume, or ambiguous persistent state. Common database automation is limited to managed Node services using PostgreSQL, MySQL/MariaDB, or SQLite with an allowlisted `db:migrate|migrate` script and current backup, repository-check, restore-drill, and snapshot readiness. Missing/stale evidence, unknown engines, stateful Compose, or database evidence without a typed migration returns `manual_required`.
+
+## Supply chain and build containment
+
+Node plans bind the exact dependency-lock SHA-256 and run a frozen install—`npm ci`, `pnpm install --frozen-lockfile`, or `bun install --frozen-lockfile`—before the allowlisted build. Dependency lifecycle scripts are disabled. Install and build run as the managed non-root owner with a clean environment containing only contract-required keys. Every preflight/deploy revalidates source and supply-chain inputs.
+
+Compose plans bind the Compose file and every detected Dockerfile. External images and every non-`scratch` `FROM` must use `@sha256:<digest>` references. Mutable tags, dynamic base images, privileged mode, host networking, Docker socket mounts, and root bind mounts keep the project `assisted`. This is bounded build containment, not a separate VM or network-disconnected builder; dependency downloads and Docker builds still rely on operator repository and network policy.
+
+## Health gate and controlled rollback
+
+Production managed plans enable a typed post-deploy health gate, bounded stabilization, and at most one rollback attempt. Evaluate the failed journal read-only first:
+
+```bash
+opsctl deploy-health-controller ./deploy-plan.yml --journal <journal-id> --dry-run --json
+opsctl request-health-rollback ./deploy-plan.yml --journal <journal-id> --reason "health gate failed"
+# after independent approval
+opsctl deploy-health-controller ./deploy-plan.yml --journal <journal-id> --execute --approval-token <token> --json
+```
+
+The token binds the exact plan digest, failed journal, and snapshot. Execution additionally requires an approved journal-specific `health_rollback.<journal-id>` scope and create-new claim/result records bound it to one attempt. Automatic scope is limited to Caddy configuration when the plan changed it and the snapshot captured it. Registry write-back, application code/images, static output, systemd units, migrations, and data produce `manual_required`; opsctl neither claims to restore uncaptured artifacts nor overwrites unrelated Registry changes. MCP remains read-only and exposes no controller execution path.
