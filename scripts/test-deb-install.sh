@@ -93,6 +93,15 @@ test -f /usr/lib/systemd/system/opsctl-volume-protect-campaign@.service
 test -f /usr/lib/systemd/system/opsctl-volume-protect-campaign@.timer
 test -f /usr/lib/systemd/system/opsctl-evidence-verify.service
 test -f /usr/lib/systemd/system/opsctl-evidence-verify.timer
+grep -qx 'User=opsctl' /usr/lib/systemd/system/opsctl-evidence-verify.service
+grep -qx 'Group=opsctl' /usr/lib/systemd/system/opsctl-evidence-verify.service
+grep -qx 'NoNewPrivileges=true' /usr/lib/systemd/system/opsctl-evidence-verify.service
+grep -qx 'ProtectSystem=strict' /usr/lib/systemd/system/opsctl-evidence-verify.service
+grep -qx 'ProtectHome=read-only' /usr/lib/systemd/system/opsctl-evidence-verify.service
+grep -qx 'ReadWritePaths=/var/lib/opsctl' /usr/lib/systemd/system/opsctl-evidence-verify.service
+grep -qx 'CapabilityBoundingSet=CAP_DAC_READ_SEARCH' /usr/lib/systemd/system/opsctl-evidence-verify.service
+grep -qx 'AmbientCapabilities=CAP_DAC_READ_SEARCH' /usr/lib/systemd/system/opsctl-evidence-verify.service
+grep -qx 'RestrictSUIDSGID=true' /usr/lib/systemd/system/opsctl-evidence-verify.service
 test -f /usr/lib/systemd/system/opsctl-evidence-checkpoint@.service
 test -f /usr/lib/systemd/system/opsctl-evidence-checkpoint@.timer
 test -f /usr/lib/systemd/system/opsctl-recovery-lab@.service

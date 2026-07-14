@@ -1,6 +1,6 @@
 [package]
 name = "opsctl"
-version = "0.6.5"
+version = "0.6.6"
 edition = "2024"
 description = "Lightweight single-server deployment safety gate for AI-assisted operations"
 license = "MIT"

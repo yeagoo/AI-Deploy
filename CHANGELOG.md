@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.6 - 2026-07-15
+
+- Fix scheduled evidence-chain verification for immutable audit entries that reference root-owned release archives or operator-home artifacts. The packaged verifier keeps the `opsctl` state owner, runs only the exact read-only command with a read-only filesystem sandbox outside managed state, grants only `CAP_DAC_READ_SEARCH`, and includes regression assertions for the unit contract.
+
 ## 0.6.5 - 2026-07-14
 
 - Fix PostgreSQL restore qualification under the packaged `UMask=0077` service by explicitly making the isolated bind-mounted SQL copy readable to the non-root container user. The staging directory remains mode `0700`, the file is deleted after verification, and failed imports continue to block evidence.

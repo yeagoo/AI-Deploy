@@ -3,10 +3,17 @@ Description=Verify opsctl evidence chain, manifests, and checkpoints
 
 [Service]
 Type=oneshot
+# Verification is read-only, but the immutable audit history can reference
+# root-owned release artifacts and operator home directories. Keep the state
+# owner and grant read/search bypass only; do not grant root or write bypass.
 User=opsctl
 Group=opsctl
 ExecStart=/usr/bin/opsctl --registry /srv/server-registry --state-dir /var/lib/opsctl registry drift cleanup-request evidence-verify-all
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
+ProtectHome=read-only
 ReadWritePaths=/var/lib/opsctl
+CapabilityBoundingSet=CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_DAC_READ_SEARCH
+RestrictSUIDSGID=true

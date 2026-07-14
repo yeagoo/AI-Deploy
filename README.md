@@ -49,7 +49,7 @@ SQLite cache/history for fast lookup
 
 ## Current Status
 
-Current development has completed through Phase 121, followed by the managed-delivery convergence work in Phases 10–13. The `0.6.5` candidate includes bounded project compilation, domain/TLS and Secret contracts, typed database migrations, health control, supply-chain checks, constrained automatic delivery, the trusted Git-push bridge, safe Restic stale-lock recovery, and the packaged-service PostgreSQL restore qualification fix; it supersedes the CI-failed 0.6.2 tag without rewriting that published identity. The installed production version remains a separate operational fact and must be verified before use. Automatic approval, arbitrary-project execution, destructive Docker volume cleanup, and broad application/data rollback remain intentionally unsupported.
+Current development has completed through Phase 121, followed by the managed-delivery convergence work in Phases 10–13. The `0.6.6` candidate includes bounded project compilation, domain/TLS and Secret contracts, typed database migrations, health control, supply-chain checks, constrained automatic delivery, the trusted Git-push bridge, safe Restic stale-lock recovery, the packaged-service PostgreSQL restore qualification fix, and sandboxed non-root verification of historical evidence stored beneath protected operator/archive paths using only read/search bypass; it supersedes the CI-failed 0.6.2 tag without rewriting that published identity. The installed production version remains a separate operational fact and must be verified before use. Automatic approval, arbitrary-project execution, destructive Docker volume cleanup, and broad application/data rollback remain intentionally unsupported.
 
 ### Production Database Types
 
