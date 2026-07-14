@@ -79,6 +79,7 @@ fi
 dpkg -i /tmp/opsctl.deb
 test -x /usr/bin/opsctl
 /usr/bin/opsctl --version | grep -q "opsctl $OPSCTL_EXPECTED_VERSION"
+grep -q "systemctl daemon-reload" /var/lib/dpkg/info/opsctl.postinst
 id opsctl
 getent group opsctl
 test -f /usr/lib/systemd/system/opsctl-install-check.service

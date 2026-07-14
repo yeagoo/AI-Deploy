@@ -3,6 +3,7 @@
 ## 0.6.6 - 2026-07-15
 
 - Fix scheduled evidence-chain verification for immutable audit entries that reference root-owned release archives or operator-home artifacts. The packaged verifier keeps the `opsctl` state owner, runs only the exact read-only command with a read-only filesystem sandbox outside managed state, grants only `CAP_DAC_READ_SEARCH`, and includes regression assertions for the unit contract.
+- Reload the systemd manager after Debian installation or upgrade on real systemd hosts so changed packaged units take effect immediately; non-systemd package-test containers remain supported.
 - Move CI and release checkout to the official Node.js 24-based `actions/checkout@v6`, removing the deprecated Node.js 20 action runtime and using its separate temporary credential storage.
 
 ## 0.6.5 - 2026-07-14

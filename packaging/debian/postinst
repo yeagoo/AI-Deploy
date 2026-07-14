@@ -77,4 +77,10 @@ if command -v opsctl >/dev/null 2>&1; then
   fi
 fi
 
+# Refresh changed packaged units on real systemd hosts. Disposable package
+# test containers intentionally do not mount a running systemd manager.
+if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+  systemctl daemon-reload
+fi
+
 exit 0
