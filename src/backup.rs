@@ -4384,9 +4384,13 @@ fn create_readable_temp_file(path: &Path) -> Result<fs::File> {
     options.write(true).create_new(true);
     #[cfg(unix)]
     options.mode(0o644).custom_flags(libc::O_NOFOLLOW);
-    options
+    let file = options
         .open(path)
-        .with_context(|| format!("failed to create {}", path.display()))
+        .with_context(|| format!("failed to create {}", path.display()))?;
+    #[cfg(unix)]
+    file.set_permissions(fs::Permissions::from_mode(0o644))
+        .with_context(|| format!("failed to make {} container-readable", path.display()))?;
+    Ok(file)
 }
 
 fn database_dump_import_argv(restored_path: &Path, dump: &BackupDatabaseDump) -> Vec<String> {

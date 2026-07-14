@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.5 - 2026-07-14
+
+- Fix PostgreSQL restore qualification under the packaged `UMask=0077` service by explicitly making the isolated bind-mounted SQL copy readable to the non-root container user. The staging directory remains mode `0700`, the file is deleted after verification, and failed imports continue to block evidence.
+
 ## 0.6.4 - 2026-07-13
 
 - Added a fail-closed Restic stale-lock recovery step before controlled backups so a timed-out backup or restore process cannot leave retention/prune blocked indefinitely.
