@@ -14235,3 +14235,291 @@ fn test_runtime_user() -> Result<String> {
         })
         .context("no non-root test user found")
 }
+
+struct DrillSubsetFixture {
+    state_dir: TempDir,
+    registry_dir: TempDir,
+    _bin_dir: TempDir,
+    _data_dir: TempDir,
+    restore_parent: TempDir,
+    restic: std::path::PathBuf,
+    fake_docker: std::path::PathBuf,
+    docker_capture: std::path::PathBuf,
+}
+
+#[allow(clippy::too_many_lines)]
+fn drill_subset_fixture(dump_sql: &str, extra_dump_fields: &str) -> Result<DrillSubsetFixture> {
+    let state_dir = TempDir::new()?;
+    let registry_dir = TempDir::new()?;
+    let bin_dir = TempDir::new()?;
+    let data_dir = TempDir::new()?;
+    let restore_parent = TempDir::new()?;
+    copy_example_registry(registry_dir.path())?;
+    let restic = bin_dir.path().join("restic");
+    let restic_log = bin_dir.path().join("restic-argv.log");
+    let fake_docker = bin_dir.path().join("docker");
+    let docker_capture = bin_dir.path().join("docker-mounted.sql");
+    write_executable_script(
+        &restic,
+        &format!(
+            "#!/bin/sh\nif [ \"${{RESTIC_PASSWORD:-}}\" != \"secret\" ]; then exit 9; fi\nprintf '%s\\n' \"$*\" > '{}'\ntarget=''\nprev=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = '--target' ]; then target=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$target\" ]; then\n  mkdir -p \"$target/dumps\"\n  printf 'hello static\\n' > \"$target/index.html\"\n  cat > \"$target/dumps/app.sql\" <<'OPSCTL_DUMP_EOF'\n{}\nOPSCTL_DUMP_EOF\nfi\nexit 0\n",
+            restic_log.display(),
+            dump_sql,
+        ),
+    )?;
+    write_executable_script(
+        &fake_docker,
+        &format!(
+            "#!/bin/sh\nprev=''\nfor arg in \"$@\"; do\n  if [ \"$prev\" = '-v' ]; then src=\"${{arg%%:/tmp/opsctl-restore.sql:ro}}\"; cp \"$src\" '{}' 2>/dev/null || true; fi\n  prev=\"$arg\"\ndone\nexit 0\n",
+            docker_capture.display()
+        ),
+    )?;
+    let include_path = data_dir.path().join("app");
+    std::fs::create_dir_all(&include_path)?;
+    std::fs::write(
+        registry_dir.path().join("backups.yml"),
+        format!(
+            r#"
+version: 1
+repositories:
+  - id: restic-test
+    provider: restic
+    repository: {}
+    password_env: OPSCTL_TEST_RESTIC_PASSWORD_SET
+    status: active
+targets:
+  - id: pcafev2-restic
+    service_id: pcafev2
+    repository_id: restic-test
+    include_paths:
+      - {}
+    exclude_paths: []
+    tags:
+      - production
+    database_dumps:
+      - id: app-sql
+        kind: postgres
+        output_path: dumps/app.sql
+{}
+    schedule: before_deploy
+    status: active
+history:
+  - id: backup-pcafev2-test
+    service_id: pcafev2
+    target_id: pcafev2-restic
+    repository_id: restic-test
+    tool: restic
+    completed_at: "2026-07-04T01:50:00Z"
+    status: success
+    repository_snapshot_id: abcdef123456
+"#,
+            data_dir.path().join("repo").display(),
+            include_path.display(),
+            extra_dump_fields,
+        ),
+    )?;
+    Ok(DrillSubsetFixture {
+        state_dir,
+        registry_dir,
+        _bin_dir: bin_dir,
+        _data_dir: data_dir,
+        restore_parent,
+        restic,
+        fake_docker,
+        docker_capture,
+    })
+}
+
+fn drill_execute(
+    state_dir: &TempDir,
+    registry_dir: &TempDir,
+    restore_parent: &TempDir,
+    restic: &Path,
+    fake_docker: &Path,
+    extra_args: &[&str],
+) -> Result<Value> {
+    let restore_dir = restore_parent.path().join("restore-staging");
+    std::fs::create_dir_all(&restore_dir)?;
+    let state_dir_arg = state_dir.path().to_string_lossy().into_owned();
+    let registry_arg = registry_dir.path().to_string_lossy().into_owned();
+    let restore_dir_arg = restore_dir.to_string_lossy().into_owned();
+
+    let plan_output = opsctl_cmd()?
+        .env("OPSCTL_RESTIC_BIN", restic)
+        .env("OPSCTL_TEST_RESTIC_PASSWORD_SET", "secret")
+        .args([
+            "--state-dir",
+            &state_dir_arg,
+            "--registry",
+            &registry_arg,
+            "backup",
+            "drill",
+            "pcafev2",
+            "--restore-dir",
+            &restore_dir_arg,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan_value: Value = serde_json::from_slice(&plan_output)?;
+    let token = plan_value["data"]["expected_approval_token"]
+        .as_str()
+        .context("drill dry-run must print an approval token")?
+        .to_string();
+
+    let mut args = vec![
+        "--state-dir",
+        &state_dir_arg,
+        "--registry",
+        &registry_arg,
+        "backup",
+        "drill",
+        "pcafev2",
+        "--restore-dir",
+        &restore_dir_arg,
+        "--execute",
+        "--approval-token",
+        &token,
+        "--json",
+    ];
+    args.extend_from_slice(extra_args);
+    let output = opsctl_cmd()?
+        .env("OPSCTL_RESTIC_BIN", restic)
+        .env("OPSCTL_DOCKER_BIN", fake_docker)
+        .env("OPSCTL_RESTORE_DB_IMPORT_CHECK", "1")
+        .env("OPSCTL_TEST_RESTIC_PASSWORD_SET", "secret")
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    Ok(serde_json::from_slice(&output)?)
+}
+
+#[test]
+fn backup_drill_skip_import_records_skipped_without_docker() -> Result<()> {
+    let fixture = drill_subset_fixture(
+        "CREATE TABLE app(id int);\nINSERT INTO app VALUES (1);\n",
+        "",
+    )?;
+    let value = drill_execute(
+        &fixture.state_dir,
+        &fixture.registry_dir,
+        &fixture.restore_parent,
+        &fixture.restic,
+        &fixture.fake_docker,
+        &["--skip-import"],
+    )?;
+    assert_eq!(
+        value["data"]["verification"]["database_dump_checks"][0]["status"],
+        "import_skipped"
+    );
+    assert!(
+        !fixture.docker_capture.exists(),
+        "skip policy must never stage or invoke the import container"
+    );
+    assert!(
+        value["data"]["limitations"]
+            .as_array()
+            .is_none_or(|l| l.is_empty()),
+        "import_skipped is a policy decision, not a limitation"
+    );
+    Ok(())
+}
+
+#[test]
+fn backup_drill_include_table_imports_only_matching_tables() -> Result<()> {
+    let dump = concat!(
+        "CREATE TABLE public.distros (id integer);\n",
+        "CREATE TABLE public.packages (id integer);\n",
+        "COPY public.distros (id, name) FROM stdin;\n",
+        "1\tdebian\n",
+        "\\.\n",
+        "COPY public.packages (id, name) FROM stdin;\n",
+        "1\tnginx\n",
+        "\\.\n",
+        "SELECT pg_catalog.setval('public.distros_id_seq', 1, true);\n",
+        "SELECT pg_catalog.setval('public.packages_id_seq', 2, true);\n",
+    );
+    let fixture = drill_subset_fixture(dump, "")?;
+    let value = drill_execute(
+        &fixture.state_dir,
+        &fixture.registry_dir,
+        &fixture.restore_parent,
+        &fixture.restic,
+        &fixture.fake_docker,
+        &["--include-table", "distros"],
+    )?;
+    assert_eq!(
+        value["data"]["verification"]["database_dump_checks"][0]["status"],
+        "import_subset_verified"
+    );
+    let filtered = std::fs::read_to_string(&fixture.docker_capture)
+        .context("import container must receive the filtered dump")?;
+    assert!(filtered.contains("CREATE TABLE public.packages"));
+    assert!(filtered.contains("COPY public.distros"));
+    assert!(filtered.contains("1\tdebian"));
+    assert!(!filtered.contains("COPY public.packages"));
+    assert!(!filtered.contains("nginx"));
+    assert!(filtered.contains("setval('public.distros_id_seq'"));
+    assert!(!filtered.contains("setval('public.packages_id_seq'"));
+    Ok(())
+}
+
+#[test]
+fn backup_drill_registry_import_check_false_skips_without_flags() -> Result<()> {
+    let fixture = drill_subset_fixture(
+        "CREATE TABLE app(id int);\nINSERT INTO app VALUES (1);\n",
+        "        import_check: false\n",
+    )?;
+    let value = drill_execute(
+        &fixture.state_dir,
+        &fixture.registry_dir,
+        &fixture.restore_parent,
+        &fixture.restic,
+        &fixture.fake_docker,
+        &[],
+    )?;
+    assert_eq!(
+        value["data"]["verification"]["database_dump_checks"][0]["status"],
+        "import_skipped"
+    );
+    assert!(!fixture.docker_capture.exists());
+    Ok(())
+}
+
+#[test]
+fn backup_drill_skip_import_conflicts_with_include_table() -> Result<()> {
+    let state_dir = TempDir::new()?;
+    let registry_dir = TempDir::new()?;
+    copy_example_registry(registry_dir.path())?;
+    let state_dir_arg = state_dir.path().to_string_lossy().into_owned();
+    let registry_arg = registry_dir.path().to_string_lossy().into_owned();
+    let output = opsctl_cmd()?
+        .args([
+            "--state-dir",
+            &state_dir_arg,
+            "--registry",
+            &registry_arg,
+            "backup",
+            "drill",
+            "pcafev2",
+            "--restore-dir",
+            "/tmp/example-staging",
+            "--skip-import",
+            "--include-table",
+            "distros",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stderr
+        .clone();
+    let stderr = String::from_utf8(output)?;
+    assert!(stderr.contains("cannot be used with"));
+    Ok(())
+}

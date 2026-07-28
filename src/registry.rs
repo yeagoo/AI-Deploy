@@ -483,6 +483,16 @@ pub struct BackupDatabaseDump {
     #[serde(default)]
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub restore_postgres_settings: Vec<String>,
+    /// Registry-level import-check policy: `false` records `import_skipped`
+    /// instead of attempting (and staging) a full import.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub import_check: Option<bool>,
+    /// When non-empty, the import check streams the plain-SQL dump through a
+    /// COPY/INSERT section filter and imports only the matching tables.
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub import_include_tables: Vec<String>,
     pub output_path: PathBuf,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub notes: Option<String>,

@@ -1641,6 +1641,15 @@ pub enum BackupCommand {
         /// Approval token printed by backup drill without --execute.
         #[arg(long)]
         approval_token: Option<String>,
+
+        /// Skip the database import check for this run and record import_skipped.
+        #[arg(long, conflicts_with = "include_table")]
+        skip_import: bool,
+
+        /// Restrict the database import check to matching tables (name,
+        /// schema.name, or trailing-* prefix). Repeatable.
+        #[arg(long = "include-table")]
+        include_table: Vec<String>,
     },
     /// Clean old scheduled restore drill staging directories under the opsctl state directory.
     DrillCleanup {

@@ -66,6 +66,15 @@ targets:
     kind: postgres
     container: pcafe-db
     database: configured-by-env
+    # Optional import-check policy for restore drills on disk-constrained
+    # hosts. `import_check: false` records import_skipped (no staging, no
+    # container import); `import_include_tables` streams the dump through a
+    # COPY/INSERT section filter so only matching tables are imported
+    # (staging stays bounded; DDL is fully verified).
+    # import_check: false
+    # import_include_tables:
+    #   - distros
+    #   - operations.*
     output_path: /var/lib/opsctl/backup-dumps/pcafev2/postgres.sql.zst
     notes: Dump command can be executed by controlled CLI backup and snapshot flows.
   schedule: before_deploy

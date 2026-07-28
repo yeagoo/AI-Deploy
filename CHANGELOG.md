@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.12 - 2026-07-28
+
+- Add bounded restore-drill import policies for disk-constrained hosts: a
+  per-dump registry `import_check: false` (records `import_skipped` instead
+  of staging a full import) and `import_include_tables` plus one-off
+  `backup drill --skip-import` / `--include-table <glob>` overrides.
+- Subset imports stream zstd/plain postgres dumps through a bounded
+  COPY/INSERT section filter (full DDL verified, only matching table data
+  staged, setval follows the table-prefix convention) and record
+  `import_subset_verified` with table/row/byte evidence; vacuous policies
+  and non-postgres kinds fail closed as `import_failed`.
+- `import_skipped` is a policy outcome, never a drill limitation; the schema
+  documents both new statuses and fields.
+
 ## 0.6.11 - 2026-07-16
 
 - Align remote-bootstrap execution and rollback approval plan ids with the shared typed `deploy_*` approval contract.

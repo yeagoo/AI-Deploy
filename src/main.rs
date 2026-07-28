@@ -71,10 +71,11 @@ use crate::{
     backup::{
         BackupDrillOptions, BackupDrillSuiteOptions, BackupPlanOptions, BackupRefreshStaleOptions,
         BackupRepositoryActionOptions, BackupRepositoryInitOptions, BackupRestoreOptions,
-        BackupRunOptions, BackupS3SmokeOptions, backup_doctor, backup_history, backup_readiness,
-        backup_refresh_stale, backup_repository_check, backup_repository_init,
-        backup_repository_prune, backup_restore_drill, backup_restore_drill_suite, backup_s3_smoke,
-        plan_backup, plan_backup_restore, restore_backup, run_backup,
+        BackupRunOptions, BackupS3SmokeOptions, ImportPolicyOverride, backup_doctor,
+        backup_history, backup_readiness, backup_refresh_stale, backup_repository_check,
+        backup_repository_init, backup_repository_prune, backup_restore_drill,
+        backup_restore_drill_suite, backup_s3_smoke, plan_backup, plan_backup_restore,
+        restore_backup, run_backup,
     },
     backup_schedule::{
         BackupTimerAlertConfigureOptions, BackupTimerAlertEnablePlanOptions,
@@ -1227,6 +1228,8 @@ fn generated_database_dump(service_id: &str, container: &str, kind: &str) -> Bac
         verify_kind: None,
         restore_image: None,
         restore_postgres_settings: Vec::new(),
+        import_check: None,
+        import_include_tables: Vec::new(),
         output_path: PathBuf::from(format!(
             "/var/lib/opsctl/backup-dumps/{service_id}/{container}-{kind}.sql.zst"
         )),
@@ -3692,6 +3695,8 @@ fn backup_command(
             execute,
             scheduled,
             approval_token,
+            skip_import,
+            include_table,
         } => backup_drill_command(
             paths,
             BackupDrillCommandInput {
@@ -3702,6 +3707,13 @@ fn backup_command(
                 execute: *execute,
                 scheduled: *scheduled,
                 approval_token: approval_token.as_deref(),
+                import_override: if *skip_import {
+                    Some(ImportPolicyOverride::SkipAll)
+                } else if !include_table.is_empty() {
+                    Some(ImportPolicyOverride::IncludeTables(include_table.clone()))
+                } else {
+                    None
+                },
             },
         ),
         BackupCommand::DrillCleanup {
@@ -5086,6 +5098,7 @@ fn backup_restore_command(
         restore_dir,
         execute,
         approval_token,
+        import_override: None,
     };
     let report = if execute {
         restore_backup(&options)?
@@ -5103,6 +5116,7 @@ struct BackupDrillCommandInput<'a> {
     execute: bool,
     scheduled: bool,
     approval_token: Option<&'a str>,
+    import_override: Option<ImportPolicyOverride>,
 }
 
 fn backup_drill_command(
@@ -5120,6 +5134,7 @@ fn backup_drill_command(
         execute: input.execute,
         scheduled: input.scheduled,
         approval_token: input.approval_token,
+        import_override: input.import_override.clone(),
     })?;
     backup_restore_report_output(report, !input.execute)
 }

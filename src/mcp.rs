@@ -817,6 +817,7 @@ fn call_tool(
                 restore_dir: &restore_dir,
                 execute: false,
                 approval_token: None,
+                import_override: None,
             })?;
             serde_json::to_value(report).context("failed to serialize backup restore plan report")
         }

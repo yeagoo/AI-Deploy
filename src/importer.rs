@@ -1113,6 +1113,8 @@ fn database_dumps(
                 verify_kind: None,
                 restore_image: None,
                 restore_postgres_settings: Vec::new(),
+                import_check: None,
+                import_include_tables: Vec::new(),
                 output_path: PathBuf::from(format!(
                     "/var/lib/opsctl/backup-dumps/{service_id}/mysql.sql.zst"
                 )),
@@ -1130,6 +1132,8 @@ fn database_dumps(
                 verify_kind: None,
                 restore_image: None,
                 restore_postgres_settings: Vec::new(),
+                import_check: None,
+                import_include_tables: Vec::new(),
                 output_path: PathBuf::from(format!(
                     "/var/lib/opsctl/backup-dumps/{service_id}/postgres.sql.zst"
                 )),
@@ -1150,6 +1154,8 @@ fn database_dumps(
             verify_kind: None,
             restore_image: None,
             restore_postgres_settings: Vec::new(),
+            import_check: None,
+            import_include_tables: Vec::new(),
             output_path: PathBuf::from(format!(
                 "/var/lib/opsctl/backup-dumps/{service_id}/database.sql.zst"
             )),

@@ -217,6 +217,18 @@ properties:
                   minLength: 1
                   maxLength: 160
                   pattern: "^[A-Za-z0-9_.=,-]+$"
+              import_check:
+                type:
+                  - boolean
+                  - "null"
+              import_include_tables:
+                type: array
+                items:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                  pattern: "^[A-Za-z0-9_.]+\\*?$"
+                maxItems: 128
               output_path:
                 type: string
               notes:
@@ -461,6 +473,8 @@ properties:
                   - plausible_sql
                   - present_compressed
                   - import_verified
+                  - import_subset_verified
+                  - import_skipped
                   - import_failed
                   - missing
                   - unrecognized

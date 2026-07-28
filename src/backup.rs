@@ -3,7 +3,7 @@ use std::{
     env,
     ffi::OsString,
     fs,
-    io::{self, Read, Write},
+    io::{self, BufRead, Read, Write},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
 };
@@ -64,6 +64,16 @@ pub struct BackupRepositoryInitOptions<'a> {
     pub approval_token: Option<&'a str>,
 }
 
+/// One-off import-check policy override (CLI). Registry dump fields carry the
+/// persistent policy; an override wins for the current run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImportPolicyOverride {
+    /// Record `import_skipped` for every dump instead of importing.
+    SkipAll,
+    /// Import only the matching tables (COPY/INSERT section filter).
+    IncludeTables(Vec<String>),
+}
+
 #[derive(Debug, Clone)]
 pub struct BackupRestoreOptions<'a> {
     pub registry: &'a Registry,
@@ -74,6 +84,7 @@ pub struct BackupRestoreOptions<'a> {
     pub restore_dir: &'a Path,
     pub execute: bool,
     pub approval_token: Option<&'a str>,
+    pub import_override: Option<ImportPolicyOverride>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,6 +98,7 @@ pub struct BackupDrillOptions<'a> {
     pub execute: bool,
     pub scheduled: bool,
     pub approval_token: Option<&'a str>,
+    pub import_override: Option<ImportPolicyOverride>,
 }
 
 #[derive(Debug, Clone)]
@@ -749,6 +761,7 @@ pub fn backup_restore_drill(options: &BackupDrillOptions<'_>) -> Result<BackupRe
         restore_dir,
         execute: options.execute,
         approval_token,
+        import_override: options.import_override.clone(),
     };
     if options.execute {
         restore_backup(&restore_options)
@@ -780,6 +793,7 @@ pub fn backup_restore_drill_suite(options: &BackupDrillSuiteOptions<'_>) -> Back
             execute: options.execute,
             scheduled: options.execute,
             approval_token: None,
+            import_override: None,
         }) {
             Ok(report) => reports.push(report),
             Err(error) => reports.push(blocked_drill_suite_report(
@@ -1139,7 +1153,11 @@ pub fn restore_backup(options: &BackupRestoreOptions<'_>) -> Result<BackupRestor
     report.status = if report.ok { "success" } else { "failed" }.to_string();
     report.operations = vec![executed];
     if report.ok {
-        let verification = verify_restored_backup(options.restore_dir, &target)?;
+        let verification = verify_restored_backup(
+            options.restore_dir,
+            &target,
+            options.import_override.as_ref(),
+        )?;
         report.ok = verification.limitations.is_empty();
         if !report.ok {
             report.status = "partial".to_string();
@@ -4046,6 +4064,7 @@ fn safe_repository_failure_reason(stdout: &str, stderr: &str) -> &'static str {
 fn verify_restored_backup(
     restore_dir: &Path,
     target: &BackupTarget,
+    import_override: Option<&ImportPolicyOverride>,
 ) -> Result<BackupRestoreVerification> {
     let metadata = fs::symlink_metadata(restore_dir).with_context(|| {
         format!(
@@ -4127,7 +4146,7 @@ fn verify_restored_backup(
     let database_dump_checks = target
         .database_dumps
         .iter()
-        .map(|dump| verify_restored_database_dump(restore_dir, dump))
+        .map(|dump| verify_restored_database_dump(restore_dir, dump, import_override))
         .collect::<Result<Vec<_>>>()?;
     for check in &database_dump_checks {
         if matches!(
@@ -4169,9 +4188,41 @@ fn is_safe_restore_symlink(restore_dir: &Path, path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// Effective import-check policy for one dump: CLI override first, then the
+/// registry fields (`import_check: false` → skip, non-empty
+/// `import_include_tables` → subset), else a full import.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum EffectiveImportPolicy {
+    Full,
+    Skip,
+    Subset(Vec<String>),
+}
+
+fn effective_import_policy(
+    dump: &BackupDatabaseDump,
+    import_override: Option<&ImportPolicyOverride>,
+) -> EffectiveImportPolicy {
+    match import_override {
+        Some(ImportPolicyOverride::SkipAll) => EffectiveImportPolicy::Skip,
+        Some(ImportPolicyOverride::IncludeTables(tables)) if !tables.is_empty() => {
+            EffectiveImportPolicy::Subset(tables.clone())
+        }
+        _ => {
+            if dump.import_check == Some(false) {
+                EffectiveImportPolicy::Skip
+            } else if !dump.import_include_tables.is_empty() {
+                EffectiveImportPolicy::Subset(dump.import_include_tables.clone())
+            } else {
+                EffectiveImportPolicy::Full
+            }
+        }
+    }
+}
+
 fn verify_restored_database_dump(
     restore_dir: &Path,
     dump: &BackupDatabaseDump,
+    import_override: Option<&ImportPolicyOverride>,
 ) -> Result<BackupRestoreDatabaseDumpCheck> {
     let restored_path = restored_dump_path(restore_dir, &dump.output_path)?;
     if !restored_path.exists() {
@@ -4200,11 +4251,26 @@ fn verify_restored_database_dump(
             detail: "restored database dump path is not a regular file".to_string(),
         });
     }
+    let policy = effective_import_policy(dump, import_override);
+    if policy == EffectiveImportPolicy::Skip {
+        return Ok(BackupRestoreDatabaseDumpCheck {
+            dump_id: dump.id.clone(),
+            restored_path: display_path(&restored_path),
+            status: "import_skipped".to_string(),
+            detail: "import check disabled by registry or CLI policy; restored files and dump presence were verified"
+                .to_string(),
+        });
+    }
     if dump_is_zstd_compressed(&restored_path)
         && restore_db_import_check_enabled()
         && database_dump_kind_importable(dump)
     {
-        return Ok(verify_zstd_database_dump_import(&restored_path, dump));
+        return Ok(match &policy {
+            EffectiveImportPolicy::Subset(tables) => {
+                verify_zstd_database_dump_subset_import(&restored_path, dump, tables)
+            }
+            _ => verify_zstd_database_dump_import(&restored_path, dump),
+        });
     }
     if dump_is_compressed(&restored_path) {
         return Ok(BackupRestoreDatabaseDumpCheck {
@@ -4217,7 +4283,12 @@ fn verify_restored_database_dump(
     let preview = read_text_preview(&restored_path, RESTORE_VERIFY_SQL_PREVIEW_BYTES)?;
     let plausible = preview_contains_sql(&preview);
     if plausible && restore_db_import_check_enabled() && database_dump_kind_importable(dump) {
-        return Ok(verify_database_dump_import(&restored_path, dump));
+        return Ok(match &policy {
+            EffectiveImportPolicy::Subset(tables) => {
+                verify_database_dump_subset_import(&restored_path, dump, tables)
+            }
+            _ => verify_database_dump_import(&restored_path, dump),
+        });
     }
     Ok(BackupRestoreDatabaseDumpCheck {
         dump_id: dump.id.clone(),
@@ -4244,6 +4315,298 @@ fn restore_db_import_check_enabled() -> bool {
 
 fn database_dump_kind_importable(dump: &BackupDatabaseDump) -> bool {
     database_dump_import_kind(dump).is_some()
+}
+
+// ---- Subset import check (bounded staging) ----------------------------------
+
+/// Statistics from a subset filter pass, recorded in the drill history.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct DumpFilterStats {
+    tables_matched: usize,
+    copy_rows: usize,
+    insert_rows: usize,
+    output_bytes: u64,
+}
+
+/// One COPY data line can be megabytes; cap a single dump line at 64 MiB so a
+/// malformed or hostile dump cannot exhaust memory during filtering.
+const DUMP_FILTER_MAX_LINE_BYTES: usize = 64 << 20;
+
+/// Table pattern: exact `name`, `schema.name`, or a single trailing `*`
+/// prefix glob (e.g. `watch_*`). No other wildcard positions.
+fn table_pattern_matches(pattern: &str, schema: &str, table: &str) -> bool {
+    if let Some(prefix) = pattern.strip_suffix('*') {
+        return schema.starts_with(prefix)
+            || table.starts_with(prefix)
+            || format!("{schema}.{table}").starts_with(prefix);
+    }
+    if let Some((ps, pt)) = pattern.split_once('.') {
+        return ps == schema && pt == table;
+    }
+    pattern == table
+}
+
+fn any_table_matches(patterns: &[String], schema: &str, table: &str) -> bool {
+    patterns
+        .iter()
+        .any(|p| table_pattern_matches(p, schema, table))
+}
+
+/// Parse `"schema"."table"` or `"table"` from a COPY/INSERT target. Quoted
+/// identifiers keep their inner dots only when the whole part is quoted; the
+/// dumps produced by pg_dump never contain unquoted dots inside identifiers.
+fn parse_qualified_table(raw: &str) -> Option<(String, String)> {
+    let unquote = |s: &str| s.trim().trim_matches('"').to_string();
+    let mut parts = raw.splitn(2, '.');
+    let first = parts.next()?;
+    match parts.next() {
+        Some(second) => Some((unquote(first), unquote(second))),
+        None => Some(("public".to_string(), unquote(first))),
+    }
+}
+
+/// A setval line's sequence belongs to an included table when the sequence
+/// name itself matches a pattern, or starts with an included table's name
+/// plus `_` (pg's `<table>_<column>_seq` convention).
+fn setval_belongs_to_subset(patterns: &[String], schema: &str, sequence: &str) -> bool {
+    if any_table_matches(patterns, schema, sequence) {
+        return true;
+    }
+    patterns.iter().any(|p| {
+        let table = p
+            .strip_suffix('*')
+            .map(|prefix| prefix.rsplit(['.', '_']).next().unwrap_or(prefix))
+            .unwrap_or_else(|| p.rsplit('.').next().unwrap_or(p));
+        !table.is_empty() && sequence.starts_with(&format!("{table}_"))
+    })
+}
+
+/// Extract the sequence reference from `SELECT pg_catalog.setval(...)`.
+fn parse_setval_sequence(line: &str) -> Option<(String, String)> {
+    let start = line.find("setval(")? + "setval(".len();
+    let rest = line.get(start..)?.trim_start();
+    let quote = rest.chars().next()?;
+    if quote != '\'' {
+        return None;
+    }
+    let end = rest[1..].find('\'')? + 1;
+    parse_qualified_table(&rest[1..end])
+}
+
+/// Stream a plain-format postgres dump through a COPY/INSERT section filter.
+/// DDL, comments, SET commands and constraints always pass (full schema is
+/// verified); only table DATA sections are filtered. Memory stays bounded
+/// regardless of dump size.
+fn filter_postgres_dump_stream<R: BufRead, W: Write>(
+    mut reader: R,
+    mut writer: W,
+    patterns: &[String],
+) -> Result<DumpFilterStats> {
+    let mut stats = DumpFilterStats::default();
+    let mut matched_tables = std::collections::HashSet::new();
+    let mut line: Vec<u8> = Vec::with_capacity(1 << 16);
+    let mut in_skipped_copy = false;
+    loop {
+        line.clear();
+        let read = reader
+            .read_until(b'\n', &mut line)
+            .context("failed to read database dump during subset filtering")?;
+        if read == 0 {
+            break;
+        }
+        if read > DUMP_FILTER_MAX_LINE_BYTES {
+            anyhow::bail!(
+                "database dump line exceeds {DUMP_FILTER_MAX_LINE_BYTES} bytes during subset filtering"
+            );
+        }
+        let text = String::from_utf8_lossy(&line);
+        let trimmed = text.trim_end();
+        if in_skipped_copy {
+            if trimmed == "\\." {
+                in_skipped_copy = false;
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("COPY ")
+            && let Some(target_end) = rest.find(" (")
+            && trimmed.ends_with("FROM stdin;")
+            && let Some((schema, table)) = parse_qualified_table(&rest[..target_end])
+        {
+            if any_table_matches(patterns, &schema, &table) {
+                matched_tables.insert(format!("{schema}.{table}"));
+                stats.copy_rows += 1;
+                writer
+                    .write_all(&line)
+                    .context("failed to write filtered dump")?;
+                stats.output_bytes += line.len() as u64;
+            } else {
+                in_skipped_copy = true;
+            }
+            continue;
+        }
+        if let Some(rest) = trimmed.strip_prefix("INSERT INTO ") {
+            let target = rest.split(' ').next().unwrap_or("");
+            if let Some((schema, table)) = parse_qualified_table(target) {
+                if any_table_matches(patterns, &schema, &table) {
+                    matched_tables.insert(format!("{schema}.{table}"));
+                    stats.insert_rows += 1;
+                    writer
+                        .write_all(&line)
+                        .context("failed to write filtered dump")?;
+                    stats.output_bytes += line.len() as u64;
+                }
+                // INSERT lines are single statements; never passthrough.
+                continue;
+            }
+        }
+        if trimmed.starts_with("SELECT pg_catalog.setval(")
+            && let Some((schema, sequence)) = parse_setval_sequence(trimmed)
+        {
+            if setval_belongs_to_subset(patterns, &schema, &sequence) {
+                writer
+                    .write_all(&line)
+                    .context("failed to write filtered dump")?;
+                stats.output_bytes += line.len() as u64;
+            }
+            continue;
+        }
+        writer
+            .write_all(&line)
+            .context("failed to write filtered dump")?;
+        stats.output_bytes += line.len() as u64;
+    }
+    if in_skipped_copy {
+        anyhow::bail!("database dump ended inside a skipped COPY data section");
+    }
+    stats.tables_matched = matched_tables.len();
+    Ok(stats)
+}
+
+fn temporary_subset_dump_path(path: &Path) -> PathBuf {
+    let timestamp = OffsetDateTime::now_utc().unix_timestamp_nanos();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("dump.sql");
+    path.with_file_name(format!(
+        ".{file_name}.opsctl-subset-{}-{timestamp}.sql",
+        std::process::id()
+    ))
+}
+
+fn subset_filter_to_file<R: BufRead>(
+    reader: R,
+    filtered_path: &Path,
+    tables: &[String],
+) -> Result<DumpFilterStats> {
+    if let Some(parent) = filtered_path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    let output = create_readable_temp_file(filtered_path)?;
+    let stats = filter_postgres_dump_stream(reader, std::io::BufWriter::new(output), tables)?;
+    if stats.tables_matched == 0 || stats.copy_rows + stats.insert_rows == 0 {
+        anyhow::bail!(
+            "subset import policy matched no table data ({} patterns); refusing a vacuous import check",
+            tables.len()
+        );
+    }
+    Ok(stats)
+}
+
+fn subset_import_result(
+    restored_path: &Path,
+    filtered_path: &Path,
+    dump: &BackupDatabaseDump,
+    stats: &DumpFilterStats,
+) -> BackupRestoreDatabaseDumpCheck {
+    let mut check = verify_database_dump_import(filtered_path, dump);
+    check.restored_path = display_path(restored_path);
+    if check.status == "import_verified" {
+        check.status = "import_subset_verified".to_string();
+        check.detail = format!(
+            "postgres dump subset imported successfully into an isolated temporary container: {} tables, {} COPY blocks, {} INSERT rows, {} bytes staged",
+            stats.tables_matched, stats.copy_rows, stats.insert_rows, stats.output_bytes
+        );
+    }
+    check
+}
+
+fn verify_database_dump_subset_import(
+    restored_path: &Path,
+    dump: &BackupDatabaseDump,
+    tables: &[String],
+) -> BackupRestoreDatabaseDumpCheck {
+    if database_dump_import_kind(dump) != Some("postgres") {
+        return BackupRestoreDatabaseDumpCheck {
+            dump_id: dump.id.clone(),
+            restored_path: display_path(restored_path),
+            status: "import_failed".to_string(),
+            detail: "subset import filtering is only supported for postgres dumps".to_string(),
+        };
+    }
+    let filtered_path = temporary_subset_dump_path(restored_path);
+    let result = (|| {
+        let input = fs::File::open(restored_path)
+            .with_context(|| format!("failed to open {}", restored_path.display()))?;
+        let stats = subset_filter_to_file(std::io::BufReader::new(input), &filtered_path, tables)?;
+        Ok::<_, anyhow::Error>(stats)
+    })();
+    let check = match result {
+        Ok(stats) => subset_import_result(restored_path, &filtered_path, dump, &stats),
+        Err(error) => BackupRestoreDatabaseDumpCheck {
+            dump_id: dump.id.clone(),
+            restored_path: display_path(restored_path),
+            status: "import_failed".to_string(),
+            detail: format!("subset dump filtering failed: {error}"),
+        },
+    };
+    let _ = fs::remove_file(&filtered_path);
+    check
+}
+
+fn verify_zstd_database_dump_subset_import(
+    restored_path: &Path,
+    dump: &BackupDatabaseDump,
+    tables: &[String],
+) -> BackupRestoreDatabaseDumpCheck {
+    if database_dump_import_kind(dump) != Some("postgres") {
+        return BackupRestoreDatabaseDumpCheck {
+            dump_id: dump.id.clone(),
+            restored_path: display_path(restored_path),
+            status: "import_failed".to_string(),
+            detail: "subset import filtering is only supported for postgres dumps".to_string(),
+        };
+    }
+    let filtered_path = temporary_subset_dump_path(restored_path);
+    let result = (|| {
+        let input = fs::File::open(restored_path)
+            .with_context(|| format!("failed to open {}", restored_path.display()))?;
+        let decoder = zstd::Decoder::new(input).context("failed to initialize zstd decoder")?;
+        let stats =
+            subset_filter_to_file(std::io::BufReader::new(decoder), &filtered_path, tables)?;
+        Ok::<_, anyhow::Error>(stats)
+    })();
+    let check = match result {
+        Ok(stats) => {
+            let mut check = subset_import_result(restored_path, &filtered_path, dump, &stats);
+            if check.status == "import_subset_verified" {
+                check.detail = format!(
+                    "zstd postgres dump streamed through the subset filter and imported successfully: {} tables, {} COPY blocks, {} INSERT rows, {} bytes staged",
+                    stats.tables_matched, stats.copy_rows, stats.insert_rows, stats.output_bytes
+                );
+            }
+            check
+        }
+        Err(error) => BackupRestoreDatabaseDumpCheck {
+            dump_id: dump.id.clone(),
+            restored_path: display_path(restored_path),
+            status: "import_failed".to_string(),
+            detail: format!("zstd subset dump filtering failed: {error}"),
+        },
+    };
+    let _ = fs::remove_file(&filtered_path);
+    check
 }
 
 fn verify_database_dump_import(
@@ -6358,9 +6721,10 @@ mod tests {
             BackupPlanOptions, BackupRunOptions, backup_doctor, backup_history_at,
             backup_readiness, copy_dump_for_import_check, database_dump_argv,
             database_dump_import_argv, dump_is_compressed, dump_is_zstd_compressed,
-            execute_database_dump_to_path, is_safe_restore_symlink, mariadb_restore_import_script,
-            mysql_restore_import_script, parse_repository_snapshot_id, plan_backup, run_backup,
-            safe_repository_failure_reason,
+            execute_database_dump_to_path, filter_postgres_dump_stream, is_safe_restore_symlink,
+            mariadb_restore_import_script, mysql_restore_import_script, parse_qualified_table,
+            parse_repository_snapshot_id, parse_setval_sequence, plan_backup, run_backup,
+            safe_repository_failure_reason, setval_belongs_to_subset, table_pattern_matches,
         },
         registry::{BackupDatabaseDump, BackupHistoryRecord, Registry},
     };
@@ -6663,6 +7027,8 @@ mod tests {
             verify_kind: None,
             restore_image: None,
             restore_postgres_settings: Vec::new(),
+            import_check: None,
+            import_include_tables: Vec::new(),
             output_path: "/var/lib/opsctl/backup-dumps/caddy/sqlite.db".into(),
             notes: None,
         });
@@ -6719,6 +7085,8 @@ mod tests {
             verify_kind: None,
             restore_image: None,
             restore_postgres_settings: Vec::new(),
+            import_check: None,
+            import_include_tables: Vec::new(),
             output_path: "/var/lib/opsctl/backup-dumps/mysql.sql.zst".into(),
             notes: None,
         };
@@ -6751,6 +7119,8 @@ mod tests {
             verify_kind: None,
             restore_image: None,
             restore_postgres_settings: Vec::new(),
+            import_check: None,
+            import_include_tables: Vec::new(),
             output_path: "/var/lib/opsctl/backup-dumps/mariadb.sql.zst".into(),
             notes: None,
         };
@@ -6807,6 +7177,8 @@ mod tests {
             verify_kind: None,
             restore_image: None,
             restore_postgres_settings: Vec::new(),
+            import_check: None,
+            import_include_tables: Vec::new(),
             output_path: "/var/lib/opsctl/backup-dumps/postgres.sql.zst".into(),
             notes: None,
         };
@@ -6858,6 +7230,8 @@ mod tests {
                 "shared_preload_libraries=pg_cron,pg_net".to_string(),
                 "cron.database_name=restorecheck".to_string(),
             ],
+            import_check: None,
+            import_include_tables: Vec::new(),
             output_path: "/var/lib/opsctl/backup-dumps/postgres.sql.zst".into(),
             notes: None,
         };
@@ -6984,6 +7358,8 @@ snapshot abc12345 saved
             verify_kind: None,
             restore_image: None,
             restore_postgres_settings: Vec::new(),
+            import_check: None,
+            import_include_tables: Vec::new(),
             output_path: source,
             notes: None,
         };
@@ -7011,6 +7387,8 @@ snapshot abc12345 saved
             verify_kind: None,
             restore_image: None,
             restore_postgres_settings: Vec::new(),
+            import_check: None,
+            import_include_tables: Vec::new(),
             output_path: output.clone(),
             notes: None,
         };
@@ -7042,6 +7420,8 @@ snapshot abc12345 saved
             verify_kind: None,
             restore_image: None,
             restore_postgres_settings: Vec::new(),
+            import_check: None,
+            import_include_tables: Vec::new(),
             output_path: symlink,
             notes: None,
         };
@@ -7171,6 +7551,155 @@ snapshot abc12345 saved
 
         assert!(error.to_string().contains("symlink"));
         assert!(!std::fs::read_to_string(&real)?.contains("backup-test"));
+        Ok(())
+    }
+
+    fn patterns() -> Vec<String> {
+        vec![
+            "distros".to_string(),
+            "operations.watch_*".to_string(),
+            "public.knowledge".to_string(),
+        ]
+    }
+
+    #[test]
+    fn table_pattern_matches_exact_schema_and_prefix_forms() {
+        assert!(table_pattern_matches("distros", "public", "distros"));
+        assert!(!table_pattern_matches("distros", "public", "distros2"));
+        assert!(table_pattern_matches(
+            "public.knowledge",
+            "public",
+            "knowledge"
+        ));
+        assert!(!table_pattern_matches(
+            "public.knowledge",
+            "operations",
+            "knowledge"
+        ));
+        assert!(table_pattern_matches(
+            "operations.watch_*",
+            "operations",
+            "watch_subscriptions"
+        ));
+        assert!(!table_pattern_matches(
+            "operations.watch_*",
+            "public",
+            "watch_subscriptions"
+        ));
+        assert!(table_pattern_matches("watch_*", "public", "watch_cursors"));
+    }
+
+    #[test]
+    fn parse_qualified_table_handles_quoted_and_bare() {
+        assert_eq!(
+            parse_qualified_table("\"operations\".\"watch_subscriptions\""),
+            Some(("operations".into(), "watch_subscriptions".into()))
+        );
+        assert_eq!(
+            parse_qualified_table("\"distros\""),
+            Some(("public".into(), "distros".into()))
+        );
+        assert_eq!(
+            parse_qualified_table("public.knowledge"),
+            Some(("public".into(), "knowledge".into()))
+        );
+    }
+
+    #[test]
+    fn setval_follows_table_prefix_convention() {
+        let p = patterns();
+        assert!(setval_belongs_to_subset(&p, "public", "distros_id_seq"));
+        assert!(setval_belongs_to_subset(
+            &p,
+            "operations",
+            "watch_subscriptions_id_seq"
+        ));
+        assert!(!setval_belongs_to_subset(&p, "public", "packages_id_seq"));
+        assert_eq!(
+            parse_setval_sequence("SELECT pg_catalog.setval('public.distros_id_seq', 42, true);"),
+            Some(("public".into(), "distros_id_seq".into()))
+        );
+    }
+
+    const SAMPLE_DUMP: &str = r"-- pg_dump header
+SET statement_timeout = 0;
+CREATE TABLE public.distros (id integer);
+CREATE TABLE public.packages (id integer);
+--
+-- Data for Name: distros; Type: TABLE DATA; Schema: public
+--
+COPY public.distros (id, name) FROM stdin;
+1	debian
+\.
+--
+-- Data for Name: packages; Type: TABLE DATA; Schema: public
+--
+COPY public.packages (id, name) FROM stdin;
+1	nginx
+2	curl
+\.
+COPY operations.watch_subscriptions (id) FROM stdin;
+7
+\.
+INSERT INTO public.knowledge (id) VALUES (1);
+INSERT INTO public.secret (id) VALUES (9);
+SELECT pg_catalog.setval('public.distros_id_seq', 1, true);
+SELECT pg_catalog.setval('public.packages_id_seq', 2, true);
+ALTER TABLE ONLY public.packages ADD CONSTRAINT packages_pkey PRIMARY KEY (id);
+";
+
+    #[test]
+    fn subset_filter_keeps_ddl_and_selected_data_only() -> Result<()> {
+        let mut out: Vec<u8> = Vec::new();
+        let stats = filter_postgres_dump_stream(SAMPLE_DUMP.as_bytes(), &mut out, &patterns())?;
+        let filtered = String::from_utf8(out)?;
+
+        // DDL, comments, SET and constraints always pass.
+        assert!(filtered.contains("CREATE TABLE public.packages"));
+        assert!(filtered.contains("ALTER TABLE ONLY public.packages ADD CONSTRAINT"));
+        assert!(filtered.contains("SET statement_timeout"));
+        // Selected data passes; unselected data is dropped with its COPY block.
+        assert!(filtered.contains("COPY public.distros"));
+        assert!(filtered.contains("1	debian"));
+        assert!(!filtered.contains("COPY public.packages"));
+        assert!(!filtered.contains("nginx"));
+        assert!(filtered.contains("COPY operations.watch_subscriptions"));
+        assert!(filtered.contains("INSERT INTO public.knowledge"));
+        assert!(!filtered.contains("INSERT INTO public.secret"));
+        // setval heuristic: distros kept, packages dropped.
+        assert!(filtered.contains("setval('public.distros_id_seq'"));
+        assert!(!filtered.contains("setval('public.packages_id_seq'"));
+
+        assert_eq!(stats.tables_matched, 3);
+        assert_eq!(stats.copy_rows, 2);
+        assert_eq!(stats.insert_rows, 1);
+        assert!(stats.output_bytes > 0);
+        Ok(())
+    }
+
+    #[test]
+    fn subset_filter_rejects_unterminated_copy() {
+        let dump = "COPY public.packages (id) FROM stdin;
+1	nginx
+";
+        let mut out: Vec<u8> = Vec::new();
+        let result = filter_postgres_dump_stream(dump.as_bytes(), &mut out, &patterns());
+        assert!(
+            result.is_err(),
+            "unterminated COPY section must fail closed"
+        );
+    }
+
+    #[test]
+    fn subset_filter_vacuous_match_is_detected_by_caller() -> Result<()> {
+        let mut out: Vec<u8> = Vec::new();
+        let stats = filter_postgres_dump_stream(
+            SAMPLE_DUMP.as_bytes(),
+            &mut out,
+            &["nonexistent_*".to_string()],
+        )?;
+        assert_eq!(stats.tables_matched, 0);
+        assert_eq!(stats.copy_rows + stats.insert_rows, 0);
         Ok(())
     }
 }
