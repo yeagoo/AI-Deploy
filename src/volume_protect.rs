@@ -1117,7 +1117,15 @@ fn backup_target_covers_exact_volume(
                 && drill
                     .database_dump_checks
                     .iter()
-                    .any(|check| check.dump_id == dump.id && check.status == "import_verified")
+                    // A subset import is still a real import verification; a
+                    // policy-skipped import verified nothing and does not count.
+                    .any(|check| {
+                        check.dump_id == dump.id
+                            && matches!(
+                                check.status.as_str(),
+                                "import_verified" | "import_subset_verified"
+                            )
+                    })
         })
     });
     path_covered || verified_dump

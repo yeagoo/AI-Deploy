@@ -14493,6 +14493,85 @@ fn backup_drill_registry_import_check_false_skips_without_flags() -> Result<()> 
 }
 
 #[test]
+fn backup_drill_vacuous_include_table_fails_closed() -> Result<()> {
+    let fixture = drill_subset_fixture(
+        "CREATE TABLE app(id int);\nINSERT INTO app VALUES (1);\n",
+        "",
+    )?;
+    let restore_dir = fixture.restore_parent.path().join("restore-staging");
+    std::fs::create_dir_all(&restore_dir)?;
+    let state_dir_arg = fixture.state_dir.path().to_string_lossy().into_owned();
+    let registry_arg = fixture.registry_dir.path().to_string_lossy().into_owned();
+    let restore_dir_arg = restore_dir.to_string_lossy().into_owned();
+    let plan_output = opsctl_cmd()?
+        .env("OPSCTL_RESTIC_BIN", &fixture.restic)
+        .env("OPSCTL_TEST_RESTIC_PASSWORD_SET", "secret")
+        .args([
+            "--state-dir",
+            &state_dir_arg,
+            "--registry",
+            &registry_arg,
+            "backup",
+            "drill",
+            "pcafev2",
+            "--restore-dir",
+            &restore_dir_arg,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let plan_value: Value = serde_json::from_slice(&plan_output)?;
+    let token = plan_value["data"]["expected_approval_token"]
+        .as_str()
+        .context("drill dry-run must print an approval token")?
+        .to_string();
+
+    let output = opsctl_cmd()?
+        .env("OPSCTL_RESTIC_BIN", &fixture.restic)
+        .env("OPSCTL_DOCKER_BIN", &fixture.fake_docker)
+        .env("OPSCTL_RESTORE_DB_IMPORT_CHECK", "1")
+        .env("OPSCTL_TEST_RESTIC_PASSWORD_SET", "secret")
+        .args([
+            "--state-dir",
+            &state_dir_arg,
+            "--registry",
+            &registry_arg,
+            "backup",
+            "drill",
+            "pcafev2",
+            "--restore-dir",
+            &restore_dir_arg,
+            "--execute",
+            "--approval-token",
+            &token,
+            "--json",
+            "--include-table",
+            "nonexistent_*",
+        ])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&output)?;
+    assert_eq!(value["ok"], false);
+    assert_eq!(
+        value["data"]["verification"]["database_dump_checks"][0]["status"],
+        "import_failed"
+    );
+    assert!(
+        value["data"]["limitations"]
+            .as_array()
+            .is_some_and(|l| !l.is_empty()),
+        "a vacuous subset policy must surface as a limitation"
+    );
+    Ok(())
+}
+
+#[test]
 fn backup_drill_skip_import_conflicts_with_include_table() -> Result<()> {
     let state_dir = TempDir::new()?;
     let registry_dir = TempDir::new()?;

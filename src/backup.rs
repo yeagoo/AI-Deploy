@@ -4252,6 +4252,9 @@ fn verify_restored_database_dump(
         });
     }
     let policy = effective_import_policy(dump, import_override);
+    // A skipped dump gets no decompression/footer verification here — by
+    // design, integrity coverage for policy-skipped dumps lives in the
+    // separate weekly dump verifier (zstd/footer/DDL), not in the drill.
     if policy == EffectiveImportPolicy::Skip {
         return Ok(BackupRestoreDatabaseDumpCheck {
             dump_id: dump.id.clone(),
@@ -4340,7 +4343,10 @@ fn table_pattern_matches(pattern: &str, schema: &str, table: &str) -> bool {
             || table.starts_with(prefix)
             || format!("{schema}.{table}").starts_with(prefix);
     }
-    if let Some((ps, pt)) = pattern.split_once('.') {
+    // Schemas may themselves contain dots (quoted "my.schema"), so split the
+    // qualifier off at the LAST dot: "operations.watch_*" → ("operations",
+    // "watch_*"), "my.schema.tbl" → ("my.schema", "tbl").
+    if let Some((ps, pt)) = pattern.rsplit_once('.') {
         return ps == schema && pt == table;
     }
     pattern == table
@@ -4352,16 +4358,50 @@ fn any_table_matches(patterns: &[String], schema: &str, table: &str) -> bool {
         .any(|p| table_pattern_matches(p, schema, table))
 }
 
-/// Parse `"schema"."table"` or `"table"` from a COPY/INSERT target. Quoted
-/// identifiers keep their inner dots only when the whole part is quoted; the
-/// dumps produced by pg_dump never contain unquoted dots inside identifiers.
+/// Parse one SQL identifier: a double-quoted name (with `""` escape) or a
+/// bare token up to the next `.` or whitespace. Returns the identifier and
+/// the remaining input.
+fn parse_identifier(raw: &str) -> Option<(String, &str)> {
+    if let Some(rest) = raw.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = rest.char_indices();
+        while let Some((i, c)) = chars.next() {
+            if c == '"' {
+                let mut lookahead = chars.clone();
+                if lookahead.next().is_some_and(|(_, c2)| c2 == '"') {
+                    out.push('"');
+                    chars.next();
+                    continue;
+                }
+                return Some((out, &rest[i + 1..]));
+            }
+            out.push(c);
+        }
+        None
+    } else {
+        let end = raw.find(['.', ' ', '\t']).unwrap_or(raw.len());
+        if end == 0 {
+            None
+        } else {
+            Some((raw[..end].to_string(), &raw[end..]))
+        }
+    }
+}
+
+/// Parse `"schema"."table"` or `"table"` from a COPY/INSERT target. The
+/// parser is quote-aware, so dots inside a quoted schema or table name stay
+/// part of the identifier; the whole input must be consumed.
 fn parse_qualified_table(raw: &str) -> Option<(String, String)> {
-    let unquote = |s: &str| s.trim().trim_matches('"').to_string();
-    let mut parts = raw.splitn(2, '.');
-    let first = parts.next()?;
-    match parts.next() {
-        Some(second) => Some((unquote(first), unquote(second))),
-        None => Some(("public".to_string(), unquote(first))),
+    let (first, rest) = parse_identifier(raw.trim_start())?;
+    match rest.strip_prefix('.') {
+        Some(rest) => {
+            let (table, rest) = parse_identifier(rest)?;
+            rest.trim().is_empty().then_some((first, table))
+        }
+        None => rest
+            .trim()
+            .is_empty()
+            .then_some(("public".to_string(), first)),
     }
 }
 
@@ -4397,6 +4437,13 @@ fn parse_setval_sequence(line: &str) -> Option<(String, String)> {
 /// DDL, comments, SET commands and constraints always pass (full schema is
 /// verified); only table DATA sections are filtered. Memory stays bounded
 /// regardless of dump size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CopyState {
+    Normal,
+    Kept,
+    Skipped,
+}
+
 fn filter_postgres_dump_stream<R: BufRead, W: Write>(
     mut reader: R,
     mut writer: W,
@@ -4405,10 +4452,14 @@ fn filter_postgres_dump_stream<R: BufRead, W: Write>(
     let mut stats = DumpFilterStats::default();
     let mut matched_tables = std::collections::HashSet::new();
     let mut line: Vec<u8> = Vec::with_capacity(1 << 16);
-    let mut in_skipped_copy = false;
+    let mut copy_state = CopyState::Normal;
     loop {
         line.clear();
+        // The take adapter caps the bytes read per line, so a malformed or
+        // hostile dump cannot exhaust memory before the length check fires.
         let read = reader
+            .by_ref()
+            .take((DUMP_FILTER_MAX_LINE_BYTES + 1) as u64)
             .read_until(b'\n', &mut line)
             .context("failed to read database dump during subset filtering")?;
         if read == 0 {
@@ -4421,17 +4472,47 @@ fn filter_postgres_dump_stream<R: BufRead, W: Write>(
         }
         let text = String::from_utf8_lossy(&line);
         let trimmed = text.trim_end();
-        if in_skipped_copy {
-            if trimmed == "\\." {
-                in_skipped_copy = false;
+        match copy_state {
+            CopyState::Skipped => {
+                if trimmed == "\\." {
+                    copy_state = CopyState::Normal;
+                }
+                continue;
             }
-            continue;
+            CopyState::Kept => {
+                // Data rows of a kept block pass through verbatim and are
+                // never re-interpreted as statements. pg_dump escapes a
+                // literal `\.` data value as `\\.`, so the 2-character
+                // terminator line is unambiguous.
+                writer
+                    .write_all(&line)
+                    .context("failed to write filtered dump")?;
+                stats.output_bytes += line.len() as u64;
+                if trimmed == "\\." {
+                    copy_state = CopyState::Normal;
+                }
+                continue;
+            }
+            CopyState::Normal => {}
         }
-        if let Some(rest) = trimmed.strip_prefix("COPY ")
-            && let Some(target_end) = rest.find(" (")
-            && trimmed.ends_with("FROM stdin;")
-            && let Some((schema, table)) = parse_qualified_table(&rest[..target_end])
-        {
+        if let Some(rest) = trimmed.strip_prefix("COPY ") {
+            if !trimmed.ends_with("FROM stdin;") {
+                // Not a dump-data COPY (COPY ... TO never appears in dump
+                // files); pass through like any other statement.
+                writer
+                    .write_all(&line)
+                    .context("failed to write filtered dump")?;
+                stats.output_bytes += line.len() as u64;
+                continue;
+            }
+            // A data COPY we cannot attribute must fail closed: passing it
+            // through would silently defeat the staging bound.
+            let Some(target_end) = rest.find(" (") else {
+                anyhow::bail!("unparseable COPY header during subset filtering: {trimmed}");
+            };
+            let Some((schema, table)) = parse_qualified_table(&rest[..target_end]) else {
+                anyhow::bail!("unparseable COPY target during subset filtering: {trimmed}");
+            };
             if any_table_matches(patterns, &schema, &table) {
                 matched_tables.insert(format!("{schema}.{table}"));
                 stats.copy_rows += 1;
@@ -4439,8 +4520,9 @@ fn filter_postgres_dump_stream<R: BufRead, W: Write>(
                     .write_all(&line)
                     .context("failed to write filtered dump")?;
                 stats.output_bytes += line.len() as u64;
+                copy_state = CopyState::Kept;
             } else {
-                in_skipped_copy = true;
+                copy_state = CopyState::Skipped;
             }
             continue;
         }
@@ -4475,8 +4557,8 @@ fn filter_postgres_dump_stream<R: BufRead, W: Write>(
             .context("failed to write filtered dump")?;
         stats.output_bytes += line.len() as u64;
     }
-    if in_skipped_copy {
-        anyhow::bail!("database dump ended inside a skipped COPY data section");
+    if copy_state != CopyState::Normal {
+        anyhow::bail!("database dump ended inside a COPY data section");
     }
     stats.tables_matched = matched_tables.len();
     Ok(stats)
@@ -7687,6 +7769,89 @@ ALTER TABLE ONLY public.packages ADD CONSTRAINT packages_pkey PRIMARY KEY (id);
         assert!(
             result.is_err(),
             "unterminated COPY section must fail closed"
+        );
+    }
+
+    #[test]
+    fn subset_filter_kept_block_data_is_never_reinterpreted() -> Result<()> {
+        let dump = concat!(
+            "COPY public.distros (id, note) FROM stdin;\n",
+            "1	debian\n",
+            "2	INSERT INTO public.secret VALUES (9);\n",
+            "3	COPY public.packages (id) FROM stdin;\n",
+            "4	SELECT pg_catalog.setval('public.packages_id_seq', 2, true);\n",
+            "5	\\.\n",
+            "\\.\n",
+        );
+        let mut out: Vec<u8> = Vec::new();
+        let stats =
+            filter_postgres_dump_stream(dump.as_bytes(), &mut out, &["distros".to_string()])?;
+        let filtered = String::from_utf8(out)?;
+        // Every data row survives verbatim, including statement lookalikes
+        // and the escaped literal `\.` — only the true terminator ends it.
+        assert!(filtered.contains("2	INSERT INTO public.secret VALUES (9);"));
+        assert!(filtered.contains("3	COPY public.packages (id) FROM stdin;"));
+        assert!(
+            filtered.contains("4	SELECT pg_catalog.setval('public.packages_id_seq', 2, true);")
+        );
+        assert!(filtered.contains("5	\\."));
+        assert_eq!(stats.copy_rows, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn subset_filter_parses_dots_inside_quoted_identifiers() -> Result<()> {
+        let dump = "COPY \"my.schema\".\"tbl\" (id) FROM stdin;\n1\n\\.\n";
+        let mut out: Vec<u8> = Vec::new();
+        let stats =
+            filter_postgres_dump_stream(dump.as_bytes(), &mut out, &["my.schema.tbl".to_string()])?;
+        let filtered = String::from_utf8(out)?;
+        assert!(filtered.contains("COPY \"my.schema\".\"tbl\""));
+        assert_eq!(stats.tables_matched, 1);
+        assert_eq!(stats.copy_rows, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn subset_filter_unattributable_copy_fails_closed() {
+        let dump = "COPY public.distros FROM stdin;\n1\n\\.\n";
+        let mut out: Vec<u8> = Vec::new();
+        let result =
+            filter_postgres_dump_stream(dump.as_bytes(), &mut out, &["distros".to_string()]);
+        assert!(
+            result.is_err(),
+            "a COPY without a column list must fail closed"
+        );
+    }
+
+    #[test]
+    fn subset_filter_escaped_terminator_does_not_end_block() -> Result<()> {
+        let dump = "COPY public.distros (id, v) FROM stdin;\n1	\\.\n\\.\n";
+        let mut out: Vec<u8> = Vec::new();
+        let stats =
+            filter_postgres_dump_stream(dump.as_bytes(), &mut out, &["distros".to_string()])?;
+        let filtered = String::from_utf8(out)?;
+        // The escaped data row `\.` (3 chars) is kept; the block ends at the
+        // real 2-char terminator.
+        assert_eq!(filtered.matches("\\.").count(), 2);
+        assert_eq!(stats.copy_rows, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn parse_qualified_table_quote_aware() {
+        assert_eq!(
+            parse_qualified_table("\"my.schema\".\"tbl\""),
+            Some(("my.schema".into(), "tbl".into()))
+        );
+        assert_eq!(
+            parse_qualified_table("\"Weird\".\"Ta.Ble\""),
+            Some(("Weird".into(), "Ta.Ble".into()))
+        );
+        assert_eq!(
+            parse_qualified_table("\"a\".\"b\" trailing"),
+            None,
+            "unconsumed input must reject"
         );
     }
 
