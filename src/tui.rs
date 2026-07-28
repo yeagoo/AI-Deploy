@@ -1124,7 +1124,22 @@ fn build_tui_drift_review_document(
     item_drafts: &BTreeMap<DriftItemKey, TuiDriftReviewItemDraft>,
     actor: &str,
 ) -> (DriftReviewDocument, Vec<String>) {
-    let mut report = drift_review_export(registry);
+    apply_tui_drift_review_actions(
+        drift_review_export(registry).review,
+        ownership_findings,
+        actions,
+        item_drafts,
+        actor,
+    )
+}
+
+fn apply_tui_drift_review_actions(
+    mut review: DriftReviewDocument,
+    ownership_findings: &[DriftOwnershipFinding],
+    actions: &BTreeMap<DriftGroupKey, DriftReviewAction>,
+    item_drafts: &BTreeMap<DriftItemKey, TuiDriftReviewItemDraft>,
+    actor: &str,
+) -> (DriftReviewDocument, Vec<String>) {
     let mut notes = Vec::new();
     let expires_at = OffsetDateTime::now_utc()
         .checked_add(TimeDuration::days(30))
@@ -1136,7 +1151,7 @@ fn build_tui_drift_review_document(
         .map(|finding| (finding.target.clone(), finding))
         .collect::<BTreeMap<_, _>>();
 
-    for group in &mut report.review.groups {
+    for group in &mut review.groups {
         let key = DriftGroupKey {
             kind: group.kind.clone(),
             group: group.group.clone(),
@@ -1217,7 +1232,7 @@ fn build_tui_drift_review_document(
             }
         }
     }
-    (report.review, unique_strings(notes))
+    (review, unique_strings(notes))
 }
 
 fn selected_drift_group_items(model: &TuiModel) -> Vec<&DriftReviewItemDocument> {
@@ -2423,25 +2438,126 @@ fn parse_audit_line(line: &str) -> Option<AuditTailItem> {
 mod tests {
     use std::fs;
 
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
     use anyhow::Result;
     use tempfile::TempDir;
 
-    use crate::paths::RuntimePaths;
-    use crate::{
-        drift::{DriftFilter, drift_groups, drift_ownership},
-        registry::Registry,
+    use crate::drift::{
+        DriftOwnershipFinding, DriftReviewDocument, DriftReviewGroupDocument,
+        DriftReviewItemDocument,
     };
+    use crate::paths::RuntimePaths;
 
     use super::{
         DriftGroupKey, DriftItemKey, DriftReviewAction, TuiDriftReviewItemDraft,
-        build_tui_drift_review_document, dump_tui,
+        apply_tui_drift_review_actions, dump_tui,
     };
+
+    fn fixture_drift_review() -> DriftReviewDocument {
+        DriftReviewDocument {
+            schema_version: "opsctl.drift-review.v1".to_string(),
+            generated_at: None,
+            groups: vec![DriftReviewGroupDocument {
+                kind: "systemd-unit".to_string(),
+                group: "fixture".to_string(),
+                active: 1,
+                ignored: 0,
+                suggested_next_step: "review fixture ownership".to_string(),
+                items: vec![DriftReviewItemDocument {
+                    code: "observed_unregistered_systemd_unit".to_string(),
+                    kind: "systemd-unit".to_string(),
+                    target: "fixture-worker.service".to_string(),
+                    action: "unknown".to_string(),
+                    confidence: Some("high".to_string()),
+                    review_action: Some("review_owner".to_string()),
+                    reason: None,
+                    service_id: None,
+                    service_candidates: vec!["caddy".to_string()],
+                    exposure: None,
+                    purpose: None,
+                    owner: None,
+                    expires_at: None,
+                    review_status: None,
+                    operator_note: None,
+                    cleanup_note: None,
+                    cleanup_risk: Some("medium".to_string()),
+                    exact_match_required: Some(true),
+                    resource_fingerprint: vec!["unit=fixture-worker.service".to_string()],
+                    ownership_evidence: vec!["synthetic deterministic fixture".to_string()],
+                }],
+            }],
+        }
+    }
+
+    fn fixture_drift_ownership() -> Vec<DriftOwnershipFinding> {
+        vec![DriftOwnershipFinding {
+            kind: "systemd-unit".to_string(),
+            code: "observed_unregistered_systemd_unit".to_string(),
+            target: "fixture-worker.service".to_string(),
+            confidence: "high".to_string(),
+            review_action: "review_owner".to_string(),
+            suggested_action: "adopt".to_string(),
+            service_candidates: vec!["caddy".to_string()],
+            evidence: vec!["synthetic deterministic fixture".to_string()],
+            resource_fingerprint: vec!["unit=fixture-worker.service".to_string()],
+            exact_match_required: true,
+            cleanup_risk: "medium".to_string(),
+        }]
+    }
+
+    fn staged_example_registry() -> Result<TempDir> {
+        let registry = TempDir::new()?;
+        for directory in ["approvals", "plans", "history"] {
+            let path = registry.path().join(directory);
+            fs::create_dir_all(&path)?;
+            #[cfg(unix)]
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o755))?;
+        }
+        for file_name in [
+            "services.yml",
+            "ports.yml",
+            "domains.yml",
+            "volumes.yml",
+            "snapshots.yml",
+            "backups.yml",
+            "policies.yml",
+        ] {
+            let destination = registry.path().join(file_name);
+            fs::copy(
+                std::path::Path::new("examples/server-registry").join(file_name),
+                &destination,
+            )?;
+            #[cfg(unix)]
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o644))?;
+        }
+        for (directory, file_name) in [
+            ("approvals", "README.md"),
+            ("approvals", "appr_example_pcafev2.yml"),
+            ("plans", "README.md"),
+            ("plans", "deploy_example_pcafev2.yml"),
+            ("history", "README.md"),
+        ] {
+            let destination = registry.path().join(directory).join(file_name);
+            fs::copy(
+                std::path::Path::new("examples/server-registry")
+                    .join(directory)
+                    .join(file_name),
+                &destination,
+            )?;
+            #[cfg(unix)]
+            fs::set_permissions(&destination, fs::Permissions::from_mode(0o644))?;
+        }
+        Ok(registry)
+    }
 
     #[test]
     fn dump_tui_loads_example_registry() -> Result<()> {
         let state = TempDir::new()?;
+        let registry = staged_example_registry()?;
         let paths = RuntimePaths {
-            registry_dir: "examples/server-registry".into(),
+            registry_dir: registry.path().to_path_buf(),
             state_dir: state.path().to_path_buf(),
             state_db: state.path().join("opsctl.db"),
             audit_log: state.path().join("audit.log"),
@@ -2475,7 +2591,10 @@ mod tests {
         assert_eq!(dump.summary.deploy_journals, 0);
         assert_eq!(dump.summary.deploy_journals_failed, 0);
         assert_eq!(dump.summary.drift_groups, dump.drift_groups.len());
-        assert!(!dump.drift_ownership_findings.is_empty());
+        assert!(
+            dump.summary.drift_owner_review_needed <= dump.drift_ownership_findings.len(),
+            "a clean build host may have no observed drift"
+        );
         assert_eq!(
             dump.summary.drift_cleanup_candidates,
             dump.drift_cleanup_candidates.len()
@@ -2549,20 +2668,14 @@ mod tests {
 
     #[test]
     fn tui_drift_review_draft_marks_group_for_cleanup() -> Result<()> {
-        let registry = Registry::load("examples/server-registry")?;
-        let groups = drift_groups(&registry);
-        let group = groups
+        let review = fixture_drift_review();
+        let group = review
             .groups
-            .iter()
-            .find(|group| group.active > 0)
-            .ok_or_else(|| anyhow::anyhow!("example registry should have active drift groups"))?;
-        let ownership = drift_ownership(
-            &registry,
-            &DriftFilter {
-                code: None,
-                target: None,
-            },
-        );
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("fixture should have a drift group"))?;
+        let group_kind = group.kind.clone();
+        let group_name = group.group.clone();
+        let ownership = fixture_drift_ownership();
         let mut actions = std::collections::BTreeMap::new();
         actions.insert(
             DriftGroupKey {
@@ -2572,9 +2685,9 @@ mod tests {
             DriftReviewAction::NeedsCleanup,
         );
 
-        let (document, notes) = build_tui_drift_review_document(
-            &registry,
-            &ownership.findings,
+        let (document, notes) = apply_tui_drift_review_actions(
+            review,
+            &ownership,
             &actions,
             &std::collections::BTreeMap::new(),
             "test-operator",
@@ -2584,7 +2697,7 @@ mod tests {
         let reviewed_group = document
             .groups
             .iter()
-            .find(|candidate| candidate.kind == group.kind && candidate.group == group.group)
+            .find(|candidate| candidate.kind == group_kind && candidate.group == group_name)
             .ok_or_else(|| anyhow::anyhow!("selected group should exist in review document"))?;
         assert!(!reviewed_group.items.is_empty());
         assert!(
@@ -2598,29 +2711,23 @@ mod tests {
 
     #[test]
     fn tui_drift_review_draft_marks_one_item_with_fields() -> Result<()> {
-        let registry = Registry::load("examples/server-registry")?;
-        let groups = drift_groups(&registry);
-        let group = groups
+        let review = fixture_drift_review();
+        let group = review
             .groups
-            .iter()
-            .find(|group| group.active > 0 && !group.sample_targets.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("example registry should have active drift targets"))?;
-        let target = group
-            .sample_targets
             .first()
-            .ok_or_else(|| anyhow::anyhow!("group should have a sample target"))?
-            .to_string();
-        let ownership = drift_ownership(
-            &registry,
-            &DriftFilter {
-                code: None,
-                target: None,
-            },
-        );
+            .ok_or_else(|| anyhow::anyhow!("fixture should have a drift group"))?;
+        let target = group
+            .items
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("fixture group should have an item"))?
+            .target
+            .clone();
+        let kind = group.kind.clone();
+        let ownership = fixture_drift_ownership();
         let mut item_drafts = std::collections::BTreeMap::new();
         item_drafts.insert(
             DriftItemKey {
-                kind: group.kind.clone(),
+                kind: kind.clone(),
                 target: target.clone(),
             },
             TuiDriftReviewItemDraft {
@@ -2632,9 +2739,9 @@ mod tests {
             },
         );
 
-        let (document, notes) = build_tui_drift_review_document(
-            &registry,
-            &ownership.findings,
+        let (document, notes) = apply_tui_drift_review_actions(
+            review,
+            &ownership,
             &std::collections::BTreeMap::new(),
             &item_drafts,
             "fallback-operator",
@@ -2645,7 +2752,7 @@ mod tests {
             .groups
             .iter()
             .flat_map(|group| group.items.iter())
-            .find(|item| item.kind == group.kind && item.target == target)
+            .find(|item| item.kind == kind && item.target == target)
             .ok_or_else(|| anyhow::anyhow!("selected item should exist in review document"))?;
         assert_eq!(reviewed_item.action, "ignore");
         assert_eq!(reviewed_item.owner.as_deref(), Some("test-operator"));
@@ -2662,29 +2769,23 @@ mod tests {
 
     #[test]
     fn tui_drift_review_draft_adopts_one_item_with_service_id() -> Result<()> {
-        let registry = Registry::load("examples/server-registry")?;
-        let groups = drift_groups(&registry);
-        let group = groups
+        let review = fixture_drift_review();
+        let group = review
             .groups
-            .iter()
-            .find(|group| group.active > 0 && !group.sample_targets.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("example registry should have active drift targets"))?;
-        let target = group
-            .sample_targets
             .first()
-            .ok_or_else(|| anyhow::anyhow!("group should have a sample target"))?
-            .to_string();
-        let ownership = drift_ownership(
-            &registry,
-            &DriftFilter {
-                code: None,
-                target: None,
-            },
-        );
+            .ok_or_else(|| anyhow::anyhow!("fixture should have a drift group"))?;
+        let target = group
+            .items
+            .first()
+            .ok_or_else(|| anyhow::anyhow!("fixture group should have an item"))?
+            .target
+            .clone();
+        let kind = group.kind.clone();
+        let ownership = fixture_drift_ownership();
         let mut item_drafts = std::collections::BTreeMap::new();
         item_drafts.insert(
             DriftItemKey {
-                kind: group.kind.clone(),
+                kind: kind.clone(),
                 target: target.clone(),
             },
             TuiDriftReviewItemDraft {
@@ -2696,9 +2797,9 @@ mod tests {
             },
         );
 
-        let (document, notes) = build_tui_drift_review_document(
-            &registry,
-            &ownership.findings,
+        let (document, notes) = apply_tui_drift_review_actions(
+            review,
+            &ownership,
             &std::collections::BTreeMap::new(),
             &item_drafts,
             "fallback-operator",
@@ -2709,7 +2810,7 @@ mod tests {
             .groups
             .iter()
             .flat_map(|group| group.items.iter())
-            .find(|item| item.kind == group.kind && item.target == target)
+            .find(|item| item.kind == kind && item.target == target)
             .ok_or_else(|| anyhow::anyhow!("selected item should exist in review document"))?;
         assert_eq!(reviewed_item.action, "adopt");
         assert_eq!(reviewed_item.service_id.as_deref(), Some("caddy"));

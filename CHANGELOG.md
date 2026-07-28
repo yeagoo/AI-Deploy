@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.6.11 - 2026-07-16
+
+- Align remote-bootstrap execution and rollback approval plan ids with the shared typed `deploy_*` approval contract.
+- Add approval-store regression coverage for both remote-bootstrap request paths.
+
+## 0.6.10 - 2026-07-16
+
+- Add a typed, bounded prior-package recovery dry-run and execution path that reads one evidence-bound root-only retained `opsctl` amd64 Debian package without creating remote files.
+- Require a private manifest, fixed backup-id directory, exact SHA-256, strict SSH identity evidence, create-new local destination, and post-download package metadata/hash verification.
+
+## 0.6.9 - 2026-07-16
+
+- Add CLI-only typed remote bootstrap for an exact old/new `opsctl` amd64 Debian package pair using strict pinned SSH identity and host-key evidence.
+- Bind immutable artifacts, target state, fixed staging paths, exact sudo commands, approvals, private retained rollback packages, journals, post-install qualification, automatic rollback, and separately approved manual rollback.
+- Promote uploaded packages into root-owned 0600 staging and re-hash them before `dpkg`; keep arbitrary commands, paths, passwords, generic transfer, MCP, helper, and sudoers-template exposure out of scope.
+
+## 0.6.8 - 2026-07-16
+
+- Add fail-closed, read-only host-edge qualification for Debian 13 and Ubuntu 26.04 with fixed Caddy, listener, Registry, firewall-chain, persistence, and loopback-upstream evidence.
+- Add CLI-only, stage-specific host-edge execution approvals with exact evidence/constraint binding, fixed clean command environments, exact APT candidate installation, private snapshots/journals, and global mutation locking.
+- Add separately approved exact-effect rollback that refuses package, Caddyfile, path, snapshot, state, or firewall-rule drift and never restores a complete firewall snapshot.
+- Keep host-edge execution and rollback outside MCP, the privileged helper, sudoers templates, packaging activation, and arbitrary command/package/port inputs.
+
+## 0.6.7 - 2026-07-15
+
+- Make TUI tests deterministic on clean and bind-mounted build hosts by using explicit synthetic drift documents and permission-normalized temporary Registry fixtures instead of assuming host drift or source-tree permissions.
+- Preserve production TUI behavior: live commands still obtain read-only observed drift from the existing scanner, while only the action-application step is extracted for hermetic regression coverage.
+
 ## 0.6.6 - 2026-07-15
 
 - Fix scheduled evidence-chain verification for immutable audit entries that reference root-owned release archives or operator-home artifacts. The packaged verifier keeps the `opsctl` state owner, runs only the exact read-only command with a read-only filesystem sandbox outside managed state, grants only `CAP_DAC_READ_SEARCH`, and includes regression assertions for the unit contract.

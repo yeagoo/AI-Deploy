@@ -5339,6 +5339,8 @@ esac
     let restic_log = workspace.path().join("restic.log");
     let fail_marker = workspace.path().join("restore-failed-once");
     let alert_log = workspace.path().join("alerts.log");
+    let non_executable_restic = bin_dir.join("not-an-executable-restic");
+    std::fs::create_dir(&non_executable_restic)?;
     let common_env = |command: &mut Command| {
         command
             .env("PATH", &path)
@@ -5819,7 +5821,7 @@ esac
 
     let mut missing_client_command = opsctl_cmd()?;
     common_env(&mut missing_client_command);
-    missing_client_command.env("OPSCTL_RESTIC_BIN", bin_dir.join("missing-restic"));
+    missing_client_command.env("OPSCTL_RESTIC_BIN", &non_executable_restic);
     let missing_client_output = missing_client_command
         .args([
             "--state-dir",
@@ -5877,7 +5879,7 @@ esac
 
     let mut duplicate_failure_command = opsctl_cmd()?;
     common_env(&mut duplicate_failure_command);
-    duplicate_failure_command.env("OPSCTL_RESTIC_BIN", bin_dir.join("missing-restic"));
+    duplicate_failure_command.env("OPSCTL_RESTIC_BIN", &non_executable_restic);
     let duplicate_failure_output = duplicate_failure_command
         .args([
             "--state-dir",
@@ -10586,14 +10588,17 @@ fn helper_sudoers_check_validates_helper_policy() -> Result<()> {
 #[test]
 fn tui_dump_json_reports_dashboard() -> Result<()> {
     let state_dir = TempDir::new()?;
+    let registry_dir = TempDir::new()?;
+    copy_example_registry_with_records(registry_dir.path())?;
     let state_dir_arg = state_dir.path().to_string_lossy().into_owned();
+    let registry_dir_arg = registry_dir.path().to_string_lossy().into_owned();
 
     let output = opsctl_cmd()?
         .args([
             "--state-dir",
             &state_dir_arg,
             "--registry",
-            "examples/server-registry",
+            &registry_dir_arg,
             "tui",
             "--dump",
             "--json",
@@ -13052,9 +13057,12 @@ fn assert_json_adoption_candidates_contain_target(value: &Value, expected: &str)
 }
 
 fn copy_example_registry(destination: &Path) -> Result<()> {
-    std::fs::create_dir_all(destination.join("approvals"))?;
-    std::fs::create_dir_all(destination.join("plans"))?;
-    std::fs::create_dir_all(destination.join("history"))?;
+    for directory in ["approvals", "plans", "history"] {
+        let path = destination.join(directory);
+        std::fs::create_dir_all(&path)?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))?;
+    }
     for file_name in [
         "services.yml",
         "ports.yml",
@@ -13064,10 +13072,32 @@ fn copy_example_registry(destination: &Path) -> Result<()> {
         "backups.yml",
         "policies.yml",
     ] {
+        let path = destination.join(file_name);
+        std::fs::copy(Path::new("examples/server-registry").join(file_name), &path)?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
+    }
+    Ok(())
+}
+
+fn copy_example_registry_with_records(destination: &Path) -> Result<()> {
+    copy_example_registry(destination)?;
+    for (directory, file_name) in [
+        ("approvals", "README.md"),
+        ("approvals", "appr_example_pcafev2.yml"),
+        ("plans", "README.md"),
+        ("plans", "deploy_example_pcafev2.yml"),
+        ("history", "README.md"),
+    ] {
+        let path = destination.join(directory).join(file_name);
         std::fs::copy(
-            Path::new("examples/server-registry").join(file_name),
-            destination.join(file_name),
+            Path::new("examples/server-registry")
+                .join(directory)
+                .join(file_name),
+            &path,
         )?;
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))?;
     }
     Ok(())
 }

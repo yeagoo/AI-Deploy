@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "opsctl")]
@@ -60,6 +60,16 @@ pub enum Command {
         /// Also read Caddy Admin API /config/ from a loopback endpoint.
         #[arg(long)]
         admin: bool,
+    },
+    /// Inspect and plan fixed Caddy/HTTPS host-edge prerequisites without mutating the host.
+    HostEdge {
+        #[command(subcommand)]
+        command: HostEdgeCommand,
+    },
+    /// Inspect, plan, and execute an approval-bound opsctl Debian package bootstrap.
+    RemoteBootstrap {
+        #[command(subcommand)]
+        command: RemoteBootstrapCommand,
     },
     /// Analyze a project directory for deployment hints.
     Analyze {
@@ -352,6 +362,8 @@ impl Command {
             Command::Doctor => "doctor",
             Command::Scan => "scan",
             Command::CaddyRoutes { .. } => "caddy-routes",
+            Command::HostEdge { .. } => "host-edge",
+            Command::RemoteBootstrap { .. } => "remote-bootstrap",
             Command::Analyze { .. } => "analyze",
             Command::Project { .. } => "project",
             Command::Plan { .. } => "plan",
@@ -383,6 +395,169 @@ impl Command {
             Command::Mcp => "mcp",
         }
     }
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RemoteBootstrapCommand {
+    /// Plan retrieval of one exact retained prior package without downloading it.
+    RecoverPriorPlan {
+        /// Private YAML manifest for one evidence-bound retained package.
+        manifest: PathBuf,
+    },
+    /// Retrieve one exact retained prior package after reviewing its current evidence.
+    RecoverPrior {
+        manifest: PathBuf,
+        /// Exact evidence SHA-256 printed by recover-prior-plan.
+        #[arg(long)]
+        evidence_sha256: String,
+        /// Create the manifest-bound local destination.
+        #[arg(long)]
+        execute: bool,
+    },
+    /// Inspect the local typed manifest and immutable Debian artifacts without connecting.
+    Inspect {
+        /// Private YAML manifest describing one exact target and old/new opsctl packages.
+        manifest: PathBuf,
+    },
+    /// Run bounded read-only target checks and generate an evidence-bound upgrade plan.
+    Plan {
+        /// Private YAML manifest describing one exact target and old/new opsctl packages.
+        manifest: PathBuf,
+    },
+    /// Request approval for one exact current remote-bootstrap plan.
+    RequestExecution {
+        manifest: PathBuf,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
+    /// Execute the exact approved fixed package transition.
+    Execute {
+        manifest: PathBuf,
+        #[arg(long)]
+        evidence_sha256: String,
+        #[arg(long)]
+        approval_token: String,
+        #[arg(long)]
+        execute: bool,
+    },
+    /// List local remote-bootstrap journals.
+    Journals,
+    /// Inspect one local remote-bootstrap journal.
+    JournalInspect { journal_id: String },
+    /// Request separate approval to restore the exact prior package from one successful journal.
+    RequestRollback {
+        manifest: PathBuf,
+        journal_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
+    /// Plan exact rollback to the manifest-bound prior package.
+    Rollback {
+        manifest: PathBuf,
+        journal_id: String,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        execute: bool,
+        #[arg(long)]
+        approval_token: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum HostEdgeCommand {
+    /// Collect bounded read-only OS, Caddy, listener, systemd, and firewall evidence.
+    Inspect,
+    /// Generate an evidence-bound fixed-operation plan; this command never executes it.
+    Plan {
+        /// Fixed safety transition to qualify.
+        #[arg(long, value_enum)]
+        stage: HostEdgeStageArg,
+
+        /// Registered application service. Valid only for expose-https.
+        #[arg(long)]
+        service_id: Option<String>,
+
+        /// Registered public TLS hostname. Valid only for expose-https.
+        #[arg(long)]
+        domain: Option<String>,
+
+        /// Loopback application port. Valid only for expose-https; host is always 127.0.0.1.
+        #[arg(long)]
+        upstream_port: Option<u16>,
+    },
+    /// Request approval for one exact current host-edge plan.
+    RequestExecution {
+        #[arg(long, value_enum)]
+        stage: HostEdgeStageArg,
+        #[arg(long)]
+        service_id: Option<String>,
+        #[arg(long)]
+        domain: Option<String>,
+        #[arg(long)]
+        upstream_port: Option<u16>,
+        /// Human-readable reason for the fixed host mutation.
+        #[arg(long)]
+        reason: String,
+        /// Optional RFC3339 approval expiry.
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
+    /// Execute one approved evidence-bound host-edge plan.
+    Execute {
+        #[arg(long, value_enum)]
+        stage: HostEdgeStageArg,
+        #[arg(long)]
+        service_id: Option<String>,
+        #[arg(long)]
+        domain: Option<String>,
+        #[arg(long)]
+        upstream_port: Option<u16>,
+        /// Exact SHA-256 printed by the approved plan.
+        #[arg(long)]
+        evidence_sha256: String,
+        /// Exact execution token printed with the approval request.
+        #[arg(long)]
+        approval_token: String,
+        /// Perform the approved fixed operations.
+        #[arg(long)]
+        execute: bool,
+    },
+    /// List local host-edge execution journals.
+    Journals,
+    /// Inspect one local host-edge execution journal.
+    JournalInspect { journal_id: String },
+    /// Request approval for one exact journal rollback.
+    RequestRollback {
+        journal_id: String,
+        #[arg(long)]
+        reason: String,
+        #[arg(long)]
+        expires_at: Option<String>,
+    },
+    /// Plan or execute exact inverse effects from one journal.
+    Rollback {
+        journal_id: String,
+        /// Print the bounded inverse plan without mutation.
+        #[arg(long)]
+        dry_run: bool,
+        /// Execute after a separate journal-specific approval.
+        #[arg(long)]
+        execute: bool,
+        /// Exact rollback token printed by the dry-run/request.
+        #[arg(long)]
+        approval_token: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum HostEdgeStageArg {
+    PrepareCaddy,
+    ExposeHttps,
 }
 
 #[derive(Debug, Clone, Args)]

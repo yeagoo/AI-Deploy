@@ -17,6 +17,8 @@ mod evidence_crypto;
 mod evidence_retention;
 mod gates;
 mod health_controller;
+mod host_edge;
+mod host_edge_execution;
 mod importer;
 mod install_check;
 mod lockfile;
@@ -32,6 +34,7 @@ mod redact;
 mod registry;
 mod registry_schema;
 mod release_matrix;
+mod remote_bootstrap;
 mod scan;
 mod snapshot;
 mod sudoers;
@@ -89,8 +92,9 @@ use crate::{
     },
     cli::{
         BackupCommand, BackupTimerCommand, BackupVolumeProtectCommand, Cli, Command, HelperCommand,
-        ProjectCommand, ProjectCompileArgs, RegistryCommand, RegistryDriftCleanupRequestCommand,
-        RegistryDriftCommand, RegistryDriftReviewCommand, RegistryPublicDataExceptionCommand,
+        HostEdgeCommand, HostEdgeStageArg, ProjectCommand, ProjectCompileArgs, RegistryCommand,
+        RegistryDriftCleanupRequestCommand, RegistryDriftCommand, RegistryDriftReviewCommand,
+        RegistryPublicDataExceptionCommand, RemoteBootstrapCommand,
     },
     delivery::{
         DeliveryOptions, automatic_delivery, plan_delivery_authorization,
@@ -123,6 +127,12 @@ use crate::{
     health_controller::{
         HealthControllerOptions, evaluate_health_controller, expected_health_rollback_scope,
     },
+    host_edge::{HostEdgePlanOptions, HostEdgeStage, inspect_host_edge, plan_host_edge},
+    host_edge_execution::{
+        HostEdgeExecutionOptions, HostEdgeRollbackOptions, execute_host_edge,
+        execute_host_edge_rollback, execution_scope, execution_token, inspect_host_edge_journal,
+        list_host_edge_journals, plan_host_edge_rollback, rollback_scope,
+    },
     importer::{
         RegistryImportBuildOptions, RegistryImportWriteOptions, RegistryPromoteImportOptions,
         check_registry_import, promote_registry_import, write_registry_import,
@@ -137,6 +147,16 @@ use crate::{
     policy::{decision_for_status, evaluate_preflight, preflight_exit_code},
     registry::{BackupDatabaseDump, BackupTarget, PublicDataPortException, Registry},
     registry_schema::{list_schemas, schema_as_json, schema_by_name, validate_registry_schemas},
+    remote_bootstrap::{
+        RemoteBootstrapExecutionOptions, RemoteBootstrapRollbackOptions,
+        SshRemoteBootstrapTransport, execute_remote_bootstrap, execute_remote_bootstrap_rollback,
+        execution_constraints as remote_bootstrap_execution_constraints,
+        execution_scope as remote_bootstrap_execution_scope,
+        execution_token as remote_bootstrap_execution_token, inspect_manifest,
+        inspect_remote_bootstrap_journal, list_remote_bootstrap_journals, plan_remote_bootstrap,
+        plan_remote_bootstrap_rollback, plan_remote_prior_recovery, recover_remote_prior_package,
+        rollback_constraints as remote_bootstrap_rollback_constraints,
+    },
     scan::scan_server,
     snapshot::{
         SnapshotBaselineOptions, SnapshotOptions, create_snapshot, inspect_snapshot_archive_report,
@@ -382,6 +402,8 @@ fn execute_command(
         Command::Doctor => doctor_command(paths),
         Command::Scan => scan_command(paths),
         Command::CaddyRoutes { adapt, admin } => caddy_routes_command(*adapt, *admin),
+        Command::HostEdge { command } => host_edge_command(paths, command, actor),
+        Command::RemoteBootstrap { command } => remote_bootstrap_command(paths, command, actor),
         Command::Analyze { project } => analyze_command(project),
         Command::Project { command } => project_command(paths, command, actor),
         Command::Plan {
@@ -570,6 +592,19 @@ fn command_requires_global_lock(command: &Command) -> bool {
             | Command::DeployResume { execute: true, .. }
             | Command::DeployHealthController { execute: true, .. }
             | Command::RequestHealthRollback { .. }
+            | Command::HostEdge {
+                command: HostEdgeCommand::RequestExecution { .. }
+                    | HostEdgeCommand::Execute { execute: true, .. }
+                    | HostEdgeCommand::RequestRollback { .. }
+                    | HostEdgeCommand::Rollback { execute: true, .. },
+            }
+            | Command::RemoteBootstrap {
+                command: RemoteBootstrapCommand::RecoverPrior { execute: true, .. }
+                    | RemoteBootstrapCommand::RequestExecution { .. }
+                    | RemoteBootstrapCommand::Execute { execute: true, .. }
+                    | RemoteBootstrapCommand::RequestRollback { .. }
+                    | RemoteBootstrapCommand::Rollback { execute: true, .. },
+            }
             | Command::Project {
                 command: ProjectCommand::GitTrigger { execute: true, .. }
                     | ProjectCommand::AuthorizeDelivery { .. }
@@ -6232,6 +6267,609 @@ fn scan_command(paths: &RuntimePaths) -> Result<CommandOutput> {
     })
 }
 
+fn host_edge_command(
+    paths: &RuntimePaths,
+    command: &HostEdgeCommand,
+    actor: &str,
+) -> Result<CommandOutput> {
+    match command {
+        HostEdgeCommand::Inspect => {
+            let report = inspect_host_edge();
+            let mut lines = vec![
+                format!("schema: {}", report.schema_version),
+                format!("read_only: {}", report.read_only),
+                format!("os: {}", report.os.reason),
+                format!("caddy_package: {}", report.caddy.package_status),
+                format!("caddy_binary: {}", report.caddy.binary_status),
+                format!("listeners: {}", report.listeners.status),
+                format!("firewall: {}", report.firewall.status),
+                format!("findings: {}", report.findings.len()),
+            ];
+            for finding in &report.findings {
+                lines.push(format!(
+                    "{}\t{}\t{}",
+                    finding.severity, finding.code, finding.message
+                ));
+            }
+            Ok(CommandOutput {
+                json: serde_json::to_value(&report)
+                    .context("failed to serialize host-edge inspection")?,
+                text: lines.join("\n"),
+                exit_code: 0,
+                audit_decision: "allow",
+                dry_run: false,
+            })
+        }
+        HostEdgeCommand::Plan {
+            stage,
+            service_id,
+            domain,
+            upstream_port,
+        } => {
+            let registry = Registry::load(&paths.registry_dir)?;
+            let report = current_host_edge_plan(
+                &registry,
+                *stage,
+                service_id.as_deref(),
+                domain.as_deref(),
+                *upstream_port,
+            )?;
+            let mut lines = vec![
+                format!("plan: {}", report.plan_id),
+                format!("stage: {}", report.stage.as_str()),
+                format!("status: {}", report.status),
+                format!("evidence_sha256: {}", report.evidence_sha256),
+                format!(
+                    "fixed_public_ports: {}",
+                    report
+                        .fixed_public_ports
+                        .iter()
+                        .map(u16::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",")
+                ),
+                format!("operations: {}", report.operations.len()),
+            ];
+            for blocker in &report.blockers {
+                lines.push(format!("blocker: {blocker}"));
+            }
+            for operation in &report.operations {
+                lines.push(format!(
+                    "{}\t{}\t{}\t{}",
+                    operation.order, operation.kind, operation.target, operation.status
+                ));
+            }
+            let ready = report.ready();
+            Ok(CommandOutput {
+                json: serde_json::to_value(&report)
+                    .context("failed to serialize host-edge plan")?,
+                text: lines.join("\n"),
+                exit_code: if ready { 0 } else { 1 },
+                audit_decision: if ready { "allow" } else { "deny" },
+                dry_run: true,
+            })
+        }
+        HostEdgeCommand::RequestExecution {
+            stage,
+            service_id,
+            domain,
+            upstream_port,
+            reason,
+            expires_at,
+        } => {
+            let registry = Registry::load(&paths.registry_dir)?;
+            let plan = current_host_edge_plan(
+                &registry,
+                *stage,
+                service_id.as_deref(),
+                domain.as_deref(),
+                *upstream_port,
+            )?;
+            if plan.status != "ready" || plan.operations.is_empty() {
+                anyhow::bail!("host-edge execution approval requires a ready plan with operations");
+            }
+            let token = execution_token(&plan);
+            let scope = vec![execution_scope(plan.stage)];
+            let constraints = vec![
+                format!("evidence_sha256={}", plan.evidence_sha256),
+                format!("execution_approval_token={token}"),
+                format!("stage={}", plan.stage.as_str()),
+                "execution must use opsctl host-edge execute --execute".to_string(),
+            ];
+            let approval = request_approval(&ApprovalRequestOptions {
+                registry_root: &paths.registry_dir,
+                plan_id: &plan.plan_id,
+                requested_by: actor,
+                reason,
+                scope: &scope,
+                constraints: &constraints,
+                expires_at: expires_at.as_deref(),
+            })?;
+            Ok(CommandOutput {
+                json: json!({
+                    "decision": "require_approval",
+                    "approval": approval,
+                    "plan": plan,
+                    "execution_approval_token": token,
+                }),
+                text: format!(
+                    "approval: {}\nplan: {}\nstatus: {}\nexecution_approval_token: {}",
+                    approval.id, approval.plan_id, approval.status, token
+                ),
+                exit_code: 0,
+                audit_decision: "require_approval",
+                dry_run: false,
+            })
+        }
+        HostEdgeCommand::Execute {
+            stage,
+            service_id,
+            domain,
+            upstream_port,
+            evidence_sha256,
+            approval_token,
+            execute,
+        } => {
+            if !execute {
+                anyhow::bail!("host-edge execute requires --execute; use host-edge plan first");
+            }
+            let registry = Registry::load(&paths.registry_dir)?;
+            let approvals = list_approvals(&paths.registry_dir)?.approvals;
+            let journal = execute_host_edge(&HostEdgeExecutionOptions {
+                state_dir: &paths.state_dir,
+                registry: &registry,
+                stage: host_edge_stage(*stage),
+                service_id: service_id.as_deref(),
+                domain: domain.as_deref(),
+                upstream_port: *upstream_port,
+                evidence_sha256,
+                approval_token,
+                approvals: &approvals,
+            })?;
+            let success = journal.status == "success";
+            Ok(CommandOutput {
+                json: serde_json::to_value(&journal)?,
+                text: format!(
+                    "journal: {}\nstage: {}\nstatus: {}\nrollback_status: {}",
+                    journal.journal_id,
+                    journal.stage.as_str(),
+                    journal.status,
+                    journal.rollback_status
+                ),
+                exit_code: if success { 0 } else { 1 },
+                audit_decision: if success { "allow" } else { "deny" },
+                dry_run: false,
+            })
+        }
+        HostEdgeCommand::Journals => {
+            let report = list_host_edge_journals(&paths.state_dir)?;
+            Ok(CommandOutput {
+                json: serde_json::to_value(&report)?,
+                text: format!(
+                    "journals_dir: {}\njournals: {}",
+                    report.journals_dir,
+                    report.journals.len()
+                ),
+                exit_code: 0,
+                audit_decision: "allow",
+                dry_run: false,
+            })
+        }
+        HostEdgeCommand::JournalInspect { journal_id } => {
+            let report = inspect_host_edge_journal(&paths.state_dir, journal_id)?;
+            Ok(CommandOutput {
+                json: serde_json::to_value(&report)?,
+                text: format!(
+                    "journal: {}\nstatus: {}\nrollback_status: {}\npath: {}",
+                    report.journal.journal_id,
+                    report.journal.status,
+                    report.journal.rollback_status,
+                    report.path
+                ),
+                exit_code: 0,
+                audit_decision: "allow",
+                dry_run: false,
+            })
+        }
+        HostEdgeCommand::RequestRollback {
+            journal_id,
+            reason,
+            expires_at,
+        } => {
+            let registry = Registry::load(&paths.registry_dir)?;
+            let rollback = plan_host_edge_rollback(&paths.state_dir, &registry, journal_id)?;
+            if rollback.status != "ready" {
+                anyhow::bail!("host-edge rollback approval requires a ready rollback dry-run");
+            }
+            let token = rollback
+                .approval_token
+                .as_deref()
+                .context("ready rollback is missing an approval token")?;
+            let scope = vec![rollback_scope(journal_id)];
+            let constraints = vec![
+                format!("journal_id={journal_id}"),
+                format!("rollback_approval_token={token}"),
+                "rollback must use opsctl host-edge rollback --execute".to_string(),
+            ];
+            let approval = request_approval(&ApprovalRequestOptions {
+                registry_root: &paths.registry_dir,
+                plan_id: &rollback.approval_plan_id,
+                requested_by: actor,
+                reason,
+                scope: &scope,
+                constraints: &constraints,
+                expires_at: expires_at.as_deref(),
+            })?;
+            Ok(CommandOutput {
+                json: json!({
+                    "decision": "require_approval",
+                    "approval": approval,
+                    "rollback": rollback,
+                }),
+                text: format!(
+                    "approval: {}\njournal: {}\nstatus: {}\nrollback_approval_token: {}",
+                    approval.id, journal_id, approval.status, token
+                ),
+                exit_code: 0,
+                audit_decision: "require_approval",
+                dry_run: false,
+            })
+        }
+        HostEdgeCommand::Rollback {
+            journal_id,
+            dry_run,
+            execute,
+            approval_token,
+        } => {
+            if *dry_run == *execute {
+                anyhow::bail!("host-edge rollback requires exactly one of --dry-run or --execute");
+            }
+            let registry = Registry::load(&paths.registry_dir)?;
+            if *dry_run {
+                let report = plan_host_edge_rollback(&paths.state_dir, &registry, journal_id)?;
+                let ready = report.status == "ready";
+                return Ok(CommandOutput {
+                    json: serde_json::to_value(&report)?,
+                    text: format!(
+                        "journal: {}\nstatus: {}\noperations: {}",
+                        report.journal_id,
+                        report.status,
+                        report.operations.len()
+                    ),
+                    exit_code: if ready { 0 } else { 1 },
+                    audit_decision: if ready { "allow" } else { "deny" },
+                    dry_run: true,
+                });
+            }
+            let token = approval_token
+                .as_deref()
+                .context("host-edge rollback --execute requires --approval-token")?;
+            let approvals = list_approvals(&paths.registry_dir)?.approvals;
+            let journal = execute_host_edge_rollback(&HostEdgeRollbackOptions {
+                state_dir: &paths.state_dir,
+                registry: &registry,
+                journal_id,
+                approval_token: token,
+                approvals: &approvals,
+            })?;
+            let success = journal.rollback_status == "success";
+            Ok(CommandOutput {
+                json: serde_json::to_value(&journal)?,
+                text: format!(
+                    "journal: {}\nstatus: {}\nrollback_status: {}",
+                    journal.journal_id, journal.status, journal.rollback_status
+                ),
+                exit_code: if success { 0 } else { 1 },
+                audit_decision: if success { "allow" } else { "deny" },
+                dry_run: false,
+            })
+        }
+    }
+}
+
+fn host_edge_stage(stage: HostEdgeStageArg) -> HostEdgeStage {
+    match stage {
+        HostEdgeStageArg::PrepareCaddy => HostEdgeStage::PrepareCaddy,
+        HostEdgeStageArg::ExposeHttps => HostEdgeStage::ExposeHttps,
+    }
+}
+
+fn remote_bootstrap_command(
+    paths: &RuntimePaths,
+    command: &RemoteBootstrapCommand,
+    actor: &str,
+) -> Result<CommandOutput> {
+    match command {
+        RemoteBootstrapCommand::RecoverPriorPlan { manifest } => {
+            let plan = plan_remote_prior_recovery(manifest)?;
+            let ready = plan.status == "ready";
+            Ok(CommandOutput {
+                text: format!(
+                    "target: {}\nstatus: {}\nevidence_sha256: {}\nsource: {}",
+                    plan.target_id,
+                    plan.status,
+                    plan.evidence_sha256,
+                    plan.remote_package_path.as_deref().unwrap_or("blocked")
+                ),
+                json: serde_json::to_value(&plan)?,
+                exit_code: if ready { 0 } else { 1 },
+                audit_decision: if ready { "allow" } else { "deny" },
+                dry_run: true,
+            })
+        }
+        RemoteBootstrapCommand::RecoverPrior {
+            manifest,
+            evidence_sha256,
+            execute,
+        } => {
+            if !execute {
+                anyhow::bail!(
+                    "remote-bootstrap recover-prior requires --execute; use recover-prior-plan first"
+                );
+            }
+            let report = recover_remote_prior_package(manifest, evidence_sha256)?;
+            Ok(CommandOutput {
+                text: format!(
+                    "target: {}\nstatus: {}\nversion: {}\nsha256: {}\ndestination: {}",
+                    report.target_id,
+                    report.status,
+                    report.version,
+                    report.package_sha256,
+                    report.destination_file
+                ),
+                json: serde_json::to_value(&report)?,
+                exit_code: 0,
+                audit_decision: "allow",
+                dry_run: false,
+            })
+        }
+        RemoteBootstrapCommand::Inspect { manifest } => {
+            let (_, inspection) = inspect_manifest(manifest)?;
+            Ok(CommandOutput {
+                json: serde_json::to_value(&inspection)?,
+                text: format!(
+                    "target: {}\ncurrent: {}\nnew: {}\nread_only: true",
+                    inspection.target_id,
+                    inspection.expected_current_version,
+                    inspection.new_package.version
+                ),
+                exit_code: 0,
+                audit_decision: "allow",
+                dry_run: true,
+            })
+        }
+        RemoteBootstrapCommand::Plan { manifest } => {
+            let plan = plan_remote_bootstrap(manifest, &SshRemoteBootstrapTransport)?;
+            let ready = plan.status == "ready";
+            Ok(CommandOutput {
+                text: format!(
+                    "plan: {}\ntarget: {}\nstatus: {}\nevidence_sha256: {}",
+                    plan.plan_id, plan.target_id, plan.status, plan.evidence_sha256
+                ),
+                json: serde_json::to_value(&plan)?,
+                exit_code: if ready { 0 } else { 1 },
+                audit_decision: if ready { "allow" } else { "deny" },
+                dry_run: true,
+            })
+        }
+        RemoteBootstrapCommand::RequestExecution {
+            manifest,
+            reason,
+            expires_at,
+        } => {
+            let plan = plan_remote_bootstrap(manifest, &SshRemoteBootstrapTransport)?;
+            if plan.status != "ready" || plan.operations.is_empty() {
+                anyhow::bail!(
+                    "remote-bootstrap approval requires a ready plan with fixed operations"
+                );
+            }
+            let token = remote_bootstrap_execution_token(&plan);
+            let scope = vec![remote_bootstrap_execution_scope(&plan.target_id)];
+            let constraints = remote_bootstrap_execution_constraints(&plan, &token);
+            let approval = request_approval(&ApprovalRequestOptions {
+                registry_root: &paths.registry_dir,
+                plan_id: &plan.plan_id,
+                requested_by: actor,
+                reason,
+                scope: &scope,
+                constraints: &constraints,
+                expires_at: expires_at.as_deref(),
+            })?;
+            Ok(CommandOutput {
+                json: json!({
+                    "decision": "require_approval",
+                    "approval": approval,
+                    "plan": plan,
+                    "execution_approval_token": token,
+                }),
+                text: format!(
+                    "approval: {}\nplan: {}\nstatus: {}\nexecution_approval_token: {}",
+                    approval.id, approval.plan_id, approval.status, token
+                ),
+                exit_code: 0,
+                audit_decision: "require_approval",
+                dry_run: false,
+            })
+        }
+        RemoteBootstrapCommand::Execute {
+            manifest,
+            evidence_sha256,
+            approval_token,
+            execute,
+        } => {
+            if !execute {
+                anyhow::bail!(
+                    "remote-bootstrap execute requires --execute; use remote-bootstrap plan first"
+                );
+            }
+            let approvals = list_approvals(&paths.registry_dir)?.approvals;
+            let journal = execute_remote_bootstrap(
+                &RemoteBootstrapExecutionOptions {
+                    state_dir: &paths.state_dir,
+                    manifest_path: manifest,
+                    evidence_sha256,
+                    approval_token,
+                    approvals: &approvals,
+                },
+                &SshRemoteBootstrapTransport,
+            )?;
+            let success = journal.status == "success";
+            Ok(CommandOutput {
+                text: format!(
+                    "journal: {}\ntarget: {}\nstatus: {}\nrollback_status: {}",
+                    journal.journal_id, journal.target_id, journal.status, journal.rollback_status
+                ),
+                json: serde_json::to_value(&journal)?,
+                exit_code: if success { 0 } else { 1 },
+                audit_decision: if success { "allow" } else { "deny" },
+                dry_run: false,
+            })
+        }
+        RemoteBootstrapCommand::Journals => {
+            let report = list_remote_bootstrap_journals(&paths.state_dir)?;
+            Ok(CommandOutput {
+                text: format!("journals: {}", report.journals.len()),
+                json: serde_json::to_value(&report)?,
+                exit_code: 0,
+                audit_decision: "allow",
+                dry_run: false,
+            })
+        }
+        RemoteBootstrapCommand::JournalInspect { journal_id } => {
+            let journal = inspect_remote_bootstrap_journal(&paths.state_dir, journal_id)?;
+            Ok(CommandOutput {
+                text: format!(
+                    "journal: {}\ntarget: {}\nstatus: {}\nrollback_status: {}",
+                    journal.journal_id, journal.target_id, journal.status, journal.rollback_status
+                ),
+                json: serde_json::to_value(&journal)?,
+                exit_code: 0,
+                audit_decision: "allow",
+                dry_run: false,
+            })
+        }
+        RemoteBootstrapCommand::RequestRollback {
+            manifest,
+            journal_id,
+            reason,
+            expires_at,
+        } => {
+            let plan = plan_remote_bootstrap_rollback(
+                &paths.state_dir,
+                manifest,
+                journal_id,
+                &SshRemoteBootstrapTransport,
+            )?;
+            if plan.status != "ready" {
+                anyhow::bail!("remote-bootstrap rollback approval requires a ready plan");
+            }
+            let scope = vec![plan.approval_scope.clone()];
+            let constraints = remote_bootstrap_rollback_constraints(&plan);
+            let approval = request_approval(&ApprovalRequestOptions {
+                registry_root: &paths.registry_dir,
+                plan_id: &plan.approval_plan_id,
+                requested_by: actor,
+                reason,
+                scope: &scope,
+                constraints: &constraints,
+                expires_at: expires_at.as_deref(),
+            })?;
+            Ok(CommandOutput {
+                text: format!(
+                    "approval: {}\njournal: {}\nstatus: {}\nrollback_approval_token: {}",
+                    approval.id, plan.journal_id, approval.status, plan.approval_token
+                ),
+                json: json!({
+                    "decision": "require_approval",
+                    "approval": approval,
+                    "plan": plan,
+                }),
+                exit_code: 0,
+                audit_decision: "require_approval",
+                dry_run: false,
+            })
+        }
+        RemoteBootstrapCommand::Rollback {
+            manifest,
+            journal_id,
+            dry_run,
+            execute,
+            approval_token,
+        } => {
+            if *dry_run == *execute {
+                anyhow::bail!(
+                    "remote-bootstrap rollback requires exactly one of --dry-run or --execute"
+                );
+            }
+            if *dry_run {
+                let plan = plan_remote_bootstrap_rollback(
+                    &paths.state_dir,
+                    manifest,
+                    journal_id,
+                    &SshRemoteBootstrapTransport,
+                )?;
+                let ready = plan.status == "ready";
+                return Ok(CommandOutput {
+                    text: format!(
+                        "journal: {}\nrollback: {} -> {}\nstatus: {}\nrollback_approval_token: {}",
+                        plan.journal_id,
+                        plan.from_version,
+                        plan.to_version,
+                        plan.status,
+                        plan.approval_token
+                    ),
+                    json: serde_json::to_value(&plan)?,
+                    exit_code: if ready { 0 } else { 1 },
+                    audit_decision: if ready { "require_approval" } else { "deny" },
+                    dry_run: true,
+                });
+            }
+            let token = approval_token
+                .as_deref()
+                .context("remote-bootstrap rollback --execute requires --approval-token")?;
+            let approvals = list_approvals(&paths.registry_dir)?.approvals;
+            let journal = execute_remote_bootstrap_rollback(
+                &RemoteBootstrapRollbackOptions {
+                    state_dir: &paths.state_dir,
+                    manifest_path: manifest,
+                    journal_id,
+                    approval_token: token,
+                    approvals: &approvals,
+                },
+                &SshRemoteBootstrapTransport,
+            )?;
+            let success = journal.rollback_status == "success";
+            Ok(CommandOutput {
+                text: format!(
+                    "journal: {}\ntarget: {}\nrollback_status: {}",
+                    journal.journal_id, journal.target_id, journal.rollback_status
+                ),
+                json: serde_json::to_value(&journal)?,
+                exit_code: if success { 0 } else { 1 },
+                audit_decision: if success { "allow" } else { "deny" },
+                dry_run: false,
+            })
+        }
+    }
+}
+
+fn current_host_edge_plan(
+    registry: &Registry,
+    stage: HostEdgeStageArg,
+    service_id: Option<&str>,
+    domain: Option<&str>,
+    upstream_port: Option<u16>,
+) -> Result<host_edge::HostEdgePlan> {
+    plan_host_edge(HostEdgePlanOptions {
+        stage: host_edge_stage(stage),
+        registry,
+        inspection: inspect_host_edge(),
+        service_id,
+        domain,
+        upstream_port,
+    })
+}
+
 fn caddy_routes_command(adapt: bool, admin: bool) -> Result<CommandOutput> {
     let report = inspect_caddy_routes(adapt, admin)?;
     let mut lines = vec![
@@ -7782,6 +8420,7 @@ fn command_risk(command_name: &str) -> &'static str {
         | "doctor"
         | "scan"
         | "caddy-routes"
+        | "host-edge"
         | "explain-risk"
         | "snapshots"
         | "snapshot-inspect"
@@ -7803,6 +8442,22 @@ fn command_risk(command_name: &str) -> &'static str {
 
 fn command_risk_for(command: &Command) -> &'static str {
     match command {
+        Command::RemoteBootstrap {
+            command:
+                RemoteBootstrapCommand::RecoverPrior { execute: true, .. }
+                | RemoteBootstrapCommand::RequestExecution { .. }
+                | RemoteBootstrapCommand::Execute { execute: true, .. }
+                | RemoteBootstrapCommand::RequestRollback { .. }
+                | RemoteBootstrapCommand::Rollback { execute: true, .. },
+        } => "high",
+        Command::RemoteBootstrap { .. } => "medium",
+        Command::HostEdge {
+            command:
+                HostEdgeCommand::RequestExecution { .. }
+                | HostEdgeCommand::Execute { execute: true, .. }
+                | HostEdgeCommand::RequestRollback { .. }
+                | HostEdgeCommand::Rollback { execute: true, .. },
+        } => "high",
         Command::Project {
             command:
                 ProjectCommand::GitTrigger { execute: true, .. }
@@ -7937,6 +8592,65 @@ fn command_risk_for(command: &Command) -> &'static str {
 
 fn command_audit_target(command: &Command, paths: &RuntimePaths) -> String {
     match command {
+        Command::RemoteBootstrap {
+            command:
+                RemoteBootstrapCommand::RecoverPriorPlan { manifest }
+                | RemoteBootstrapCommand::RecoverPrior { manifest, .. }
+                | RemoteBootstrapCommand::Inspect { manifest }
+                | RemoteBootstrapCommand::Plan { manifest }
+                | RemoteBootstrapCommand::RequestExecution { manifest, .. }
+                | RemoteBootstrapCommand::Execute { manifest, .. }
+                | RemoteBootstrapCommand::RequestRollback { manifest, .. }
+                | RemoteBootstrapCommand::Rollback { manifest, .. },
+        } => display_path(manifest),
+        Command::RemoteBootstrap {
+            command:
+                RemoteBootstrapCommand::Journals | RemoteBootstrapCommand::JournalInspect { .. },
+        } => display_path(&paths.state_dir),
+        Command::HostEdge {
+            command:
+                HostEdgeCommand::Plan {
+                    stage,
+                    service_id,
+                    domain,
+                    upstream_port,
+                },
+        }
+        | Command::HostEdge {
+            command:
+                HostEdgeCommand::RequestExecution {
+                    stage,
+                    service_id,
+                    domain,
+                    upstream_port,
+                    ..
+                },
+        }
+        | Command::HostEdge {
+            command:
+                HostEdgeCommand::Execute {
+                    stage,
+                    service_id,
+                    domain,
+                    upstream_port,
+                    ..
+                },
+        } => format!(
+            "{}:{}:{}:{}",
+            match stage {
+                HostEdgeStageArg::PrepareCaddy => "prepare-caddy",
+                HostEdgeStageArg::ExposeHttps => "expose-https",
+            },
+            service_id.as_deref().unwrap_or("caddy"),
+            domain.as_deref().unwrap_or("none"),
+            upstream_port.map_or_else(|| "none".to_string(), |port| port.to_string())
+        ),
+        Command::HostEdge {
+            command:
+                HostEdgeCommand::JournalInspect { journal_id }
+                | HostEdgeCommand::RequestRollback { journal_id, .. }
+                | HostEdgeCommand::Rollback { journal_id, .. },
+        } => journal_id.clone(),
         Command::Analyze { project } | Command::Plan { project, .. } => display_path(project),
         Command::Project {
             command:
@@ -8260,6 +8974,9 @@ fn command_audit_target(command: &Command, paths: &RuntimePaths) -> String {
         | Command::Doctor
         | Command::Scan
         | Command::CaddyRoutes { .. }
+        | Command::HostEdge {
+            command: HostEdgeCommand::Inspect | HostEdgeCommand::Journals,
+        }
         | Command::Snapshots
         | Command::SnapshotCoverage { .. }
         | Command::DeployJournals
@@ -8280,6 +8997,16 @@ fn command_is_dry_run(command: &Command) -> bool {
                     | ProjectCommand::Deliver { dry_run: true, .. },
             }
             | Command::Preflight { .. }
+            | Command::HostEdge {
+                command: HostEdgeCommand::Plan { .. }
+                    | HostEdgeCommand::Rollback { dry_run: true, .. },
+            }
+            | Command::RemoteBootstrap {
+                command: RemoteBootstrapCommand::RecoverPriorPlan { .. }
+                    | RemoteBootstrapCommand::Inspect { .. }
+                    | RemoteBootstrapCommand::Plan { .. }
+                    | RemoteBootstrapCommand::Rollback { dry_run: true, .. },
+            }
             | Command::DeployHealthController { dry_run: true, .. }
             | Command::ExplainRisk { .. }
             | Command::DeployGates

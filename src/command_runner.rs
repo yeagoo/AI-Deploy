@@ -1,12 +1,16 @@
 use std::{
     env,
     ffi::OsString,
+    fs::{self, OpenOptions},
     io::{Read, Write},
     path::Path,
     process::{Command, Stdio},
     thread,
     time::Duration,
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 
 use anyhow::{Context, Result, anyhow};
 use wait_timeout::ChildExt;
@@ -16,6 +20,7 @@ use crate::env_source;
 const READ_ONLY_COMMAND_TIMEOUT: Duration = Duration::from_secs(3);
 const CONTROLLED_COMMAND_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 const MAX_CAPTURE_BYTES: u64 = 8 * 1024 * 1024;
+const FIXED_SYSTEM_PATH: &str = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 
 #[derive(Debug, Clone)]
 pub struct CapturedCommand {
@@ -30,23 +35,45 @@ pub struct ControlledCommand {
     pub stderr: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ControlledFileCommand {
+    pub bytes_written: u64,
+}
+
 pub fn capture(program: &str, args: &[&str]) -> Result<CapturedCommand> {
-    capture_with_dir(program, args, None)
+    capture_with_dir_and_env(program, args, None, &[], false)
 }
 
 pub fn capture_in_dir(program: &str, args: &[&str], working_dir: &Path) -> Result<CapturedCommand> {
-    capture_with_dir(program, args, Some(working_dir))
+    capture_with_dir_and_env(program, args, Some(working_dir), &[], false)
 }
 
-fn capture_with_dir(
+pub fn capture_with_clean_env(
+    program: &str,
+    args: &[&str],
+    envs: &[(String, OsString)],
+) -> Result<CapturedCommand> {
+    capture_with_dir_and_env(program, args, Some(Path::new("/")), envs, true)
+}
+
+fn capture_with_dir_and_env(
     program: &str,
     args: &[&str],
     working_dir: Option<&Path>,
+    envs: &[(String, OsString)],
+    clear_env: bool,
 ) -> Result<CapturedCommand> {
     let mut command = Command::new(program);
     command.args(args);
     if let Some(working_dir) = working_dir {
         command.current_dir(working_dir);
+    }
+    if clear_env {
+        command.env_clear();
+        command.env("PATH", FIXED_SYSTEM_PATH);
+    }
+    for (name, value) in envs {
+        command.env(name, value);
     }
 
     let mut child = command
@@ -169,6 +196,165 @@ pub fn run_controlled_with_clean_env_in_dir(
         CONTROLLED_COMMAND_TIMEOUT,
         true,
     )
+}
+
+pub fn run_controlled_with_clean_env_timeout(
+    program: &str,
+    args: &[String],
+    envs: &[(String, OsString)],
+    timeout: Duration,
+) -> Result<ControlledCommand> {
+    if timeout.is_zero() || timeout > CONTROLLED_COMMAND_TIMEOUT {
+        anyhow::bail!("controlled command timeout must be between 1s and 3600s");
+    }
+    run_controlled_with_dir_env_and_input(
+        program,
+        args,
+        Some(Path::new("/")),
+        envs,
+        None,
+        timeout,
+        true,
+    )
+}
+
+pub fn run_controlled_to_create_new_file_with_clean_env_timeout(
+    program: &str,
+    args: &[String],
+    envs: &[(String, OsString)],
+    destination: &Path,
+    max_bytes: u64,
+    timeout: Duration,
+) -> Result<ControlledFileCommand> {
+    if timeout.is_zero() || timeout > CONTROLLED_COMMAND_TIMEOUT {
+        anyhow::bail!("controlled command timeout must be between 1s and 3600s");
+    }
+    if max_bytes == 0 || max_bytes > 512 * 1024 * 1024 {
+        anyhow::bail!("controlled file capture limit must be between 1 byte and 512 MiB");
+    }
+    let mut destination_options = OpenOptions::new();
+    destination_options.write(true).create_new(true);
+    #[cfg(unix)]
+    destination_options
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW);
+    let destination_file = destination_options.open(destination).with_context(|| {
+        format!(
+            "failed to create controlled command destination {}",
+            destination.display()
+        )
+    })?;
+
+    let mut command = Command::new(program);
+    command
+        .args(args)
+        .current_dir("/")
+        .env_clear()
+        .env("PATH", FIXED_SYSTEM_PATH)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (name, value) in envs {
+        command.env(name, value);
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(error) => {
+            drop(destination_file);
+            let _ = fs::remove_file(destination);
+            return Err(error)
+                .with_context(|| format!("failed to run controlled command: {program}"));
+        }
+    };
+    let stdout = match child.stdout.take() {
+        Some(stdout) => stdout,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(destination_file);
+            let _ = fs::remove_file(destination);
+            anyhow::bail!("failed to capture controlled file command stdout");
+        }
+    };
+    let stderr = match child.stderr.take() {
+        Some(stderr) => stderr,
+        None => {
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(stdout);
+            drop(destination_file);
+            let _ = fs::remove_file(destination);
+            anyhow::bail!("failed to capture controlled file command stderr");
+        }
+    };
+    let destination_path = destination.to_path_buf();
+    let writer = thread::spawn(move || -> std::io::Result<u64> {
+        let mut input = stdout.take(max_bytes + 1);
+        let mut output = destination_file;
+        let copied = std::io::copy(&mut input, &mut output)?;
+        output.sync_all()?;
+        if copied > max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "controlled file command exceeded its byte limit",
+            ));
+        }
+        Ok(copied)
+    });
+    let stderr_reader = thread::spawn(move || read_bounded(stderr));
+
+    let status = match child.wait_timeout(timeout) {
+        Ok(Some(status)) => status,
+        Ok(None) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = writer.join();
+            let _ = stderr_reader.join();
+            let _ = fs::remove_file(&destination_path);
+            anyhow::bail!(
+                "controlled command timed out after {}s: {program}",
+                timeout.as_secs()
+            );
+        }
+        Err(error) => {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = writer.join();
+            let _ = stderr_reader.join();
+            let _ = fs::remove_file(&destination_path);
+            return Err(error)
+                .with_context(|| format!("failed to wait for controlled command: {program}"));
+        }
+    };
+    let bytes_written = match writer.join() {
+        Ok(Ok(bytes)) => bytes,
+        Ok(Err(error)) => {
+            let _ = stderr_reader.join();
+            let _ = fs::remove_file(&destination_path);
+            return Err(error).context("failed to write controlled command destination");
+        }
+        Err(_) => {
+            let _ = stderr_reader.join();
+            let _ = fs::remove_file(&destination_path);
+            anyhow::bail!("controlled file command writer panicked: {program}");
+        }
+    };
+    match stderr_reader.join() {
+        Ok(Ok(_)) => {}
+        Ok(Err(error)) => {
+            let _ = fs::remove_file(&destination_path);
+            return Err(error).context("failed to read controlled file command stderr");
+        }
+        Err(_) => {
+            let _ = fs::remove_file(&destination_path);
+            anyhow::bail!("controlled file command stderr reader panicked: {program}");
+        }
+    }
+    if !status.success() {
+        let _ = fs::remove_file(&destination_path);
+        anyhow::bail!("controlled file command returned a nonzero status");
+    }
+    Ok(ControlledFileCommand { bytes_written })
 }
 
 fn run_controlled_with_dir_and_env(
@@ -303,11 +489,15 @@ impl ControlledCommand {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, ffi::OsString};
+    use std::{collections::BTreeSet, ffi::OsString, time::Duration};
 
     use anyhow::Result;
 
-    use super::{run_controlled_in_dir, run_controlled_with_clean_env_in_dir};
+    use super::{
+        FIXED_SYSTEM_PATH, capture_with_clean_env, run_controlled_in_dir,
+        run_controlled_to_create_new_file_with_clean_env_timeout,
+        run_controlled_with_clean_env_in_dir,
+    };
 
     #[test]
     fn controlled_command_can_run_in_working_directory() -> Result<()> {
@@ -333,6 +523,91 @@ mod tests {
 
         assert!(captured.success());
         assert_eq!(names, BTreeSet::from(["DATABASE_URL", "PATH"]));
+        Ok(())
+    }
+
+    #[test]
+    fn read_only_clean_environment_uses_fixed_path_and_injected_keys_only() -> Result<()> {
+        let envs = vec![("LC_ALL".to_string(), OsString::from("C"))];
+        let captured = capture_with_clean_env("/usr/bin/env", &[], &envs)?;
+        let values = captured
+            .stdout
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .collect::<std::collections::BTreeMap<_, _>>();
+
+        assert!(captured.success());
+        assert_eq!(values.get("PATH"), Some(&FIXED_SYSTEM_PATH));
+        assert_eq!(values.get("LC_ALL"), Some(&"C"));
+        assert_eq!(values.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_file_capture_is_create_new_private_and_bounded() -> Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempfile::TempDir::new()?;
+        let destination = temp.path().join("capture.bin");
+        let report = run_controlled_to_create_new_file_with_clean_env_timeout(
+            "/usr/bin/printf",
+            &["exact-bytes".to_string()],
+            &[],
+            &destination,
+            64,
+            Duration::from_secs(2),
+        )?;
+        assert_eq!(report.bytes_written, 11);
+        assert_eq!(std::fs::read(&destination)?, b"exact-bytes");
+        assert_eq!(
+            std::fs::metadata(&destination)?.permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            run_controlled_to_create_new_file_with_clean_env_timeout(
+                "/usr/bin/printf",
+                &["replacement".to_string()],
+                &[],
+                &destination,
+                64,
+                Duration::from_secs(2),
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&destination)?, b"exact-bytes");
+        Ok(())
+    }
+
+    #[test]
+    fn controlled_file_capture_removes_overflow_and_nonzero_outputs() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let overflow = temp.path().join("overflow.bin");
+        assert!(
+            run_controlled_to_create_new_file_with_clean_env_timeout(
+                "/usr/bin/printf",
+                &["too-long".to_string()],
+                &[],
+                &overflow,
+                3,
+                Duration::from_secs(2),
+            )
+            .is_err()
+        );
+        assert!(!overflow.exists());
+
+        let failed = temp.path().join("failed.bin");
+        assert!(
+            run_controlled_to_create_new_file_with_clean_env_timeout(
+                "/usr/bin/false",
+                &[],
+                &[],
+                &failed,
+                64,
+                Duration::from_secs(2),
+            )
+            .is_err()
+        );
+        assert!(!failed.exists());
         Ok(())
     }
 }

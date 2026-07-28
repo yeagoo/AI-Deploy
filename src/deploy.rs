@@ -32,6 +32,7 @@ const DEPLOY_OUTPUT_PREVIEW_BYTES: usize = 8 * 1024;
 const DEPLOY_EXECUTION_SCOPE: &str = "deploy_execution";
 const DEPLOY_RESUME_SCOPE_PREFIX: &str = "deploy_resume";
 const MAX_DEPLOY_JOURNAL_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_CADDYFILE_BYTES: u64 = 1024 * 1024;
 const STATIC_SITE_MARKER: &str = ".opsctl-static-site";
 const STATIC_SITE_MAX_FILES: usize = 20_000;
 const STATIC_SITE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
@@ -878,10 +879,14 @@ pub fn execute_deploy_resume(
 
 pub fn inspect_caddy_routes(adapt: bool, admin: bool) -> Result<CaddyRoutesReport> {
     let path = caddyfile_path();
+    inspect_caddy_routes_at(&path, adapt, admin)
+}
+
+pub fn inspect_caddy_routes_at(path: &Path, adapt: bool, admin: bool) -> Result<CaddyRoutesReport> {
     if !path.exists() {
         return Ok(CaddyRoutesReport {
             read_only: true,
-            caddyfile: display_path(&path),
+            caddyfile: display_path(path),
             exists: false,
             managed_routes: Vec::new(),
             unmanaged_hosts: Vec::new(),
@@ -892,7 +897,7 @@ pub fn inspect_caddy_routes(adapt: bool, admin: bool) -> Result<CaddyRoutesRepor
             management: empty_caddy_management_report(),
         });
     }
-    let metadata = fs::symlink_metadata(&path)
+    let metadata = fs::symlink_metadata(path)
         .with_context(|| format!("failed to inspect {}", path.display()))?;
     if metadata.file_type().is_symlink() {
         anyhow::bail!("refusing to inspect Caddyfile symlink: {}", path.display());
@@ -900,11 +905,24 @@ pub fn inspect_caddy_routes(adapt: bool, admin: bool) -> Result<CaddyRoutesRepor
     if !metadata.is_file() {
         anyhow::bail!("Caddyfile is not a regular file: {}", path.display());
     }
-    let raw =
-        fs::read_to_string(&path).with_context(|| format!("failed to read {}", path.display()))?;
-    let mut report = parse_caddy_routes(&path, &raw);
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?
+        .take(MAX_CADDYFILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .with_context(|| format!("failed to read {}", path.display()))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_CADDYFILE_BYTES {
+        anyhow::bail!(
+            "Caddyfile exceeds the {} byte inspection limit: {}",
+            MAX_CADDYFILE_BYTES,
+            path.display()
+        );
+    }
+    let raw = String::from_utf8(bytes)
+        .with_context(|| format!("Caddyfile is not UTF-8: {}", path.display()))?;
+    let mut report = parse_caddy_routes(path, &raw);
     if adapt {
-        let adapt_report = inspect_caddy_adapt(&path)?;
+        let adapt_report = inspect_caddy_adapt(path)?;
         if !adapt_report.conflicts.is_empty() {
             report.findings.push(format!(
                 "caddy adapt reported {} normalized route conflict(s)",

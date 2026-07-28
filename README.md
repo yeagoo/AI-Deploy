@@ -131,6 +131,27 @@ Implemented:
 - `opsctl doctor`
 - `opsctl scan`
 - `opsctl caddy-routes [--adapt] [--admin]`
+- `opsctl host-edge inspect`
+- `opsctl host-edge plan --stage prepare-caddy`
+- `opsctl host-edge plan --stage expose-https --service-id <service-id> --domain <host> --upstream-port <port>`
+- `opsctl host-edge request-execution --stage <prepare-caddy|expose-https> --reason <text> [stage inputs]`
+- `opsctl host-edge execute --stage <prepare-caddy|expose-https> --evidence-sha256 <sha256> --approval-token <token> --execute [stage inputs]`
+- `opsctl host-edge journals`
+- `opsctl host-edge journal-inspect <journal-id>`
+- `opsctl host-edge rollback <journal-id> --dry-run`
+- `opsctl host-edge request-rollback <journal-id> --reason <text>`
+- `opsctl host-edge rollback <journal-id> --execute --approval-token <token>`
+- `opsctl remote-bootstrap inspect <private-manifest.yml>`
+- `opsctl remote-bootstrap recover-prior-plan <private-recovery-manifest.yml>`
+- `opsctl remote-bootstrap recover-prior <private-recovery-manifest.yml> --evidence-sha256 <sha256> --execute`
+- `opsctl remote-bootstrap plan <private-manifest.yml>`
+- `opsctl remote-bootstrap request-execution <private-manifest.yml> --reason <text>`
+- `opsctl remote-bootstrap execute <private-manifest.yml> --evidence-sha256 <sha256> --approval-token <token> --execute`
+- `opsctl remote-bootstrap journals`
+- `opsctl remote-bootstrap journal-inspect <journal-id>`
+- `opsctl remote-bootstrap request-rollback <private-manifest.yml> <journal-id> --reason <text>`
+- `opsctl remote-bootstrap rollback <private-manifest.yml> <journal-id> --dry-run`
+- `opsctl remote-bootstrap rollback <private-manifest.yml> <journal-id> --execute --approval-token <token>`
 - `opsctl registry drift list`
 - `opsctl registry drift groups`
 - `opsctl registry drift suggest`
@@ -264,6 +285,12 @@ Implemented:
 - Caddyfile import directive graph summaries for exact, snippet, and dynamic/glob imports.
 - Caddy adapt route normalization and conflict findings for duplicate or overlapping host/path matchers, including wildcard host, path-prefix, route-priority, matcher summaries, recursive handle chains, route specificity scoring, and TLS automation subject coverage.
 - optional loopback-only Caddy Admin API read-only summary through `caddy-routes --admin`.
+- read-only host-edge inspection for Debian 13 or Ubuntu 26.04, fixed trusted tool paths, Caddy package/unit/config state, TCP 80/443 listeners, and the `INPUT -> OPSCTL-INPUT` firewall path.
+- evidence-bound host-edge dry-run plans with two fixed stages: Caddy preparation first, then HTTPS exposure only after exact Registry ownership, `/etc/caddy/Caddyfile`, managed route, loopback upstream, listener, and firewall gates pass.
+- CLI-only host-edge execution with single-scope exact approval constraints, effective-root enforcement, same-EUID private state ownership, create-new snapshots/journals, fixed absolute binaries, fixed clean read/execute environments, no shell, and stop-on-first-failure behavior. `prepare_caddy` binds the reviewed APT candidate and installs only exact `caddy=<version>` while TCP 80/443 remain closed behind an `OPSCTL-INPUT` terminal DROP. `expose_https` additionally requires enabled `netfilter-persistent.service` for `/etc/iptables/rules.v4`, then adds only missing exact TCP 80/443 rules after Caddy revalidation.
+- journal-specific rollback approval that removes only exact recorded firewall rules, restores only journal-created package/unit/Caddyfile effects, refuses package-version/Caddyfile/state drift or duplicate rules, and never restores the complete firewall. MCP and the privileged helper do not expose host-edge execution or rollback.
+- CLI-only remote bootstrap for one exact `opsctl` amd64 Debian upgrade. A private 0600 manifest binds explicit IPv4/SSH user, key and known-hosts hashes, old/new package versions and hashes. Planning performs strict read-only target checks and exact sudo-policy probes. Execution requires an independent exact approval, retains private local package snapshots, uploads only digest-derived names, promotes them to root-owned 0600 staging, re-hashes before `dpkg`, qualifies `install-check`, and automatically restores the bound prior package after any failed install attempt. Manual rollback has a separate journal-specific approval. It is absent from MCP, helper, and sudoers templates.
+- Typed prior-package recovery reads only a fixed timestamp-shaped backup directory's `SHA256SUMS` and the unique exact-hash `opsctl_*_amd64.deb` member. It streams through strict SSH into a create-new 0600 local destination, removes every partial/error output, and accepts the result only after SHA-256, package name, version, and architecture verification. It never lists unrelated target files or creates a remote file.
 - generated typed Caddy route snippet file writes through `files.typed` with no raw content passthrough.
 - approval record listing, approval, rejection, and expiry checks.
 - deploy dry-run readiness when approval scopes cover current `needs_approval` findings.
@@ -346,6 +373,10 @@ cargo run -- doctor
 cargo run -- scan
 cargo run -- caddy-routes
 cargo run -- caddy-routes --adapt --admin
+cargo run -- host-edge inspect
+cargo run -- host-edge plan --stage prepare-caddy
+cargo run -- host-edge plan --stage expose-https --service-id example-app --domain app.example.com --upstream-port 8080
+cargo run -- host-edge journals
 cargo run -- registry drift list
 cargo run -- registry drift explain --code observed_unregistered_port
 cargo run -- registry drift adopt --target 127.0.0.1:3000 --service-id pcafev2
@@ -433,6 +464,11 @@ opsctl backup prune <repository-id> --approval-token prune:<repository-id>
 opsctl backup s3-smoke --endpoint <endpoint> --region <region> --provider <provider> --bucket <bucket> --execute
 opsctl deploy-gates
 opsctl caddy-routes
+opsctl host-edge inspect
+opsctl host-edge plan --stage prepare-caddy
+opsctl host-edge plan --stage expose-https --service-id <service-id> --domain <host> --upstream-port <port>
+opsctl host-edge journals
+opsctl host-edge journal-inspect <journal-id>
 opsctl analyze /path/to/project
 opsctl plan /path/to/project --domain example.com
 opsctl preflight ./deploy-plan.yml

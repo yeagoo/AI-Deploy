@@ -267,6 +267,32 @@ Future tests:
 - upstream port conflict.
 - Caddy reload plan dry-run.
 
+Host-edge qualification additionally tests:
+
+- unsupported OS and untrusted/missing fixed tools remain blocked.
+- read-only inspection and privileged execution expose only fixed reviewed child environments.
+- Caddy preparation requires a safe APT candidate and plans exact `caddy=<version>` installation.
+- Remote-bootstrap tests build synthetic old/new amd64 Debian fixtures and use a fake transport to cover exact approval, broader/stale approval refusal, interrupted upload, remote hash mismatch, successful qualification, private retained artifacts/journal, post-install failure, and automatic prior-package restoration.
+- CLI contracts prove execution and rollback mode gates run before manifest/network access and that no arbitrary host/user/path/command/password flags or MCP/helper bootstrap surface exists.
+- Prior-recovery tests cover checksum filename normalization, duplicate-hash ambiguity, traversal/other-directory refusal, timestamp-only backup ids, fixed command allowlists, symlink ancestors, create-new 0600 capture, overflow/nonzero cleanup, and execute-before-network gating.
+- caller-controlled package, public-port, command, and execute surfaces do not exist.
+- only exact `/etc/caddy/Caddyfile` managed routes can qualify exposure.
+- mixed-process TCP 80/443 listeners remain conflicts.
+- `INPUT` must start with an unconditional `OPSCTL-INPUT` jump.
+- source-scoped or non-ACCEPT firewall rules do not count as public TCP 80/443 allows.
+- HTTPS exposure blocks unless the fixed `netfilter-persistent.service` consumer is enabled.
+- Registry changes alter the evidence hash.
+- a ready exposure plan orders Caddy activation and pre-exposure verification before fixed firewall rules.
+- JSON inspection remains versioned and explicitly read-only.
+- execution rejects stale evidence, any extra/missing approval scope or constraint, and non-root identity before snapshot/mutation.
+- private same-EUID create-new snapshots/journals bind expected state paths and verify Caddyfile/firewall hashes.
+- partial firewall failure records only the exact successfully inserted rule as reversible.
+- rollback refuses installed-package version drift, Caddyfile drift, and duplicate/missing exact rules, then verifies package/unit/file/rule pre-state.
+- plan/help contracts contain no arbitrary package, public-port, command, or shell inputs; MCP/helper remain unchanged.
+- cross-architecture volume-protect failure fixtures use an existing non-executable target so native and emulated Linux both exercise the pre-spawn safety gate.
+- explicit volume-protect backup binaries reject directories, symlinks, missing execute bits, unsafe owners, and group/world-writable file or parent modes before receiving repository credentials.
+- volume-protect run identifiers distinguish invocations within the same second and process identity.
+
 ## Snapshot Tests
 
 Snapshot and restore are high-risk.

@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 
 #[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use crate::{
     backup::{parse_repository_snapshot_id, repository_command_env, restic_base_argv},
@@ -1230,6 +1230,17 @@ fn execute_volume_protect(
             "--tag".to_string(),
             format!("docker-volume:{}", item.target),
         ]);
+        if validate_configured_backup_program(&program).is_err() {
+            fail_volume_protect_run(
+                options,
+                item,
+                report,
+                "backup_command_error",
+                "configured volume backup program is unsafe or unavailable",
+                started,
+            )?;
+            return Ok(());
+        }
         let captured = match command_runner::run_controlled_with_env(&program, &backup_args, &env) {
             Ok(captured) => captured,
             Err(_) => {
@@ -1455,7 +1466,7 @@ fn execute_volume_protect(
     let restore_drill_id = format!(
         "volume-protect-{}-{}",
         safe_id(&item.target),
-        OffsetDateTime::now_utc().unix_timestamp()
+        OffsetDateTime::now_utc().unix_timestamp_nanos()
     );
     let resource_fingerprints = evidence_values(&ownership.evidence, "resource_fingerprint=");
     let journal_entry = VolumeProtectJournalEntry {
@@ -1553,6 +1564,44 @@ fn execute_volume_protect(
         started,
         "cleanup evidence and volume protect journal were written",
     )?;
+    Ok(())
+}
+
+fn validate_configured_backup_program(program: &str) -> Result<()> {
+    let path = Path::new(program);
+    if path.components().count() == 1 {
+        return Ok(());
+    }
+    if !path.is_absolute() {
+        anyhow::bail!("configured backup program path must be absolute");
+    }
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        anyhow::bail!("configured backup program must be a regular non-symlink file");
+    }
+    #[cfg(unix)]
+    {
+        let effective_uid = fs::metadata("/proc/self")?.uid();
+        if metadata.permissions().mode() & 0o111 == 0 {
+            anyhow::bail!("configured backup program is not executable");
+        }
+        if metadata.permissions().mode() & 0o022 != 0
+            || (metadata.uid() != 0 && metadata.uid() != effective_uid)
+        {
+            anyhow::bail!("configured backup program has unsafe ownership or permissions");
+        }
+        let parent = path
+            .parent()
+            .context("configured backup program has no parent")?;
+        let parent_metadata = fs::symlink_metadata(parent)?;
+        if parent_metadata.file_type().is_symlink()
+            || !parent_metadata.is_dir()
+            || parent_metadata.permissions().mode() & 0o022 != 0
+            || (parent_metadata.uid() != 0 && parent_metadata.uid() != effective_uid)
+        {
+            anyhow::bail!("configured backup program parent is unsafe");
+        }
+    }
     Ok(())
 }
 
@@ -2560,11 +2609,15 @@ fn volume_protect_restore_dir(
 }
 
 fn new_run_id(target: &str) -> String {
+    new_run_id_at(target, OffsetDateTime::now_utc(), std::process::id())
+}
+
+fn new_run_id_at(target: &str, now: OffsetDateTime, process_id: u32) -> String {
     format!(
         "vp-{}-{}-{}",
         safe_id(target),
-        OffsetDateTime::now_utc().unix_timestamp(),
-        std::process::id()
+        now.unix_timestamp_nanos(),
+        process_id
     )
 }
 
@@ -2615,8 +2668,45 @@ fn format_timestamp(value: OffsetDateTime) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{scan_tree, verify_database_content, verify_volume_copy};
+    use super::{
+        new_run_id_at, scan_tree, validate_configured_backup_program, verify_database_content,
+        verify_volume_copy,
+    };
     use anyhow::Result;
+    use time::OffsetDateTime;
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn run_ids_distinguish_same_second_and_process() -> Result<()> {
+        let first = OffsetDateTime::from_unix_timestamp_nanos(1_700_000_000_000_000_001)?;
+        let second = OffsetDateTime::from_unix_timestamp_nanos(1_700_000_000_000_000_002)?;
+
+        assert_ne!(
+            new_run_id_at("orphan_data", first, 42),
+            new_run_id_at("orphan_data", second, 42)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn configured_backup_program_rejects_directory_and_non_executable_file() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        assert!(validate_configured_backup_program(temp.path().to_str().unwrap_or("")).is_err());
+        let program = temp.path().join("restic");
+        std::fs::write(&program, b"fixture")?;
+        assert!(validate_configured_backup_program(program.to_str().unwrap_or("")).is_err());
+        #[cfg(unix)]
+        {
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o775))?;
+            assert!(validate_configured_backup_program(program.to_str().unwrap_or("")).is_err());
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))?;
+            assert!(validate_configured_backup_program(program.to_str().unwrap_or("")).is_ok());
+        }
+        assert!(validate_configured_backup_program("restic").is_ok());
+        Ok(())
+    }
 
     #[test]
     fn volume_copy_verification_matches_bounded_hashes() -> Result<()> {
