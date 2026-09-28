@@ -6916,7 +6916,8 @@ mod tests {
     fn native_dump_stream_is_bounded_and_cleans_failed_outputs() -> Result<()> {
         let temp = tempfile::TempDir::new()?;
         let limits = super::DumpLimits {
-            timeout: std::time::Duration::from_millis(200),
+            // Successful writes include fsync; allow for shared CI storage latency.
+            timeout: std::time::Duration::from_secs(10),
             max_bytes: 64,
             min_free_bytes: 1,
         };
@@ -6956,16 +6957,19 @@ mod tests {
                 .is_err()
             );
             assert!(!path.exists());
-            assert!(
-                super::write_database_dump_output(
-                    "/bin/sh",
-                    &["-c".into(), "printf partial; sleep 10 & wait".into()],
-                    &path,
-                    compressed,
-                    limits
-                )
-                .is_err()
-            );
+            let timeout_error = super::write_database_dump_output(
+                "/bin/sh",
+                &["-c".into(), "printf partial; sleep 10 & wait".into()],
+                &path,
+                compressed,
+                super::DumpLimits {
+                    timeout: std::time::Duration::from_millis(200),
+                    ..limits
+                },
+            )
+            .err()
+            .context("dump exceeding its deadline unexpectedly succeeded")?;
+            assert!(format!("{timeout_error:#}").contains("timed out"));
             assert!(!path.exists());
             assert!(
                 super::write_database_dump_output("/usr/bin/false", &[], &path, compressed, limits)
