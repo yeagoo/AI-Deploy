@@ -13,7 +13,7 @@ use sha2::{Digest, Sha256};
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 
 use crate::{
-    approvals::{ApprovalFile, approved_scope_for_plan},
+    approvals::{ApprovalFile, approved_scope_for_plan, valid_execution_approval},
     command_runner::{run_controlled, run_controlled_in_dir, run_controlled_with_clean_env_in_dir},
     managed_project::load_managed_environment,
     paths::display_path,
@@ -482,12 +482,14 @@ pub fn execute_deploy(options: &DeployExecutionOptions<'_>) -> Result<DeployRepo
             report.status
         );
     }
-    if !approved_scope_for_plan(options.approvals, &options.plan.id)
-        .iter()
-        .any(|scope| scope == DEPLOY_EXECUTION_SCOPE)
-    {
+    if !has_bound_execution_approval(
+        options.approvals,
+        options.plan,
+        DEPLOY_EXECUTION_SCOPE,
+        &deploy_execution_constraints(options.plan, options.snapshot_id)?,
+    ) {
         anyhow::bail!(
-            "deploy execution requires an approved approval record with scope {DEPLOY_EXECUTION_SCOPE}"
+            "deploy execution requires an approved approval record with scope {DEPLOY_EXECUTION_SCOPE} bound to the current plan and snapshot; request a new execution approval"
         );
     }
 
@@ -564,6 +566,62 @@ pub fn expected_deploy_approval_token(plan: &DeployPlan, snapshot_id: Option<&st
         Some(snapshot_id) => format!("deploy:{}:{snapshot_id}", plan.id),
         None => format!("deploy:{}", plan.id),
     }
+}
+
+pub fn deploy_execution_constraints(
+    plan: &DeployPlan,
+    snapshot_id: Option<&str>,
+) -> Result<Vec<String>> {
+    Ok(vec![
+        format!("plan_id={}", plan.id),
+        format!("plan_sha256={}", deploy_plan_sha256(plan)?),
+        format!("snapshot_id={}", snapshot_id.unwrap_or("none")),
+        format!(
+            "execution_approval_token={}",
+            expected_deploy_approval_token(plan, snapshot_id)
+        ),
+        "execution must use opsctl deploy --execute or opsctl helper run-deploy-operation"
+            .to_string(),
+    ])
+}
+
+pub fn deploy_resume_constraints(plan: &DeployPlan, journal_id: &str) -> Result<Vec<String>> {
+    Ok(vec![
+        format!("plan_id={}", plan.id),
+        format!("plan_sha256={}", deploy_plan_sha256(plan)?),
+        format!("journal_id={journal_id}"),
+        format!(
+            "resume_approval_token={}",
+            expected_deploy_resume_approval_token(plan, journal_id)
+        ),
+        "execution must use opsctl deploy-resume --execute".to_string(),
+    ])
+}
+
+fn has_bound_execution_approval(
+    approvals: &[ApprovalFile],
+    plan: &DeployPlan,
+    scope: &str,
+    constraints: &[String],
+) -> bool {
+    let expected = constraints.iter().collect::<BTreeSet<_>>();
+    let now = OffsetDateTime::now_utc();
+    approvals.iter().any(|approval| {
+        approval.record.plan_id == plan.id
+            && valid_execution_approval(&approval.record, now)
+            && !approval
+                .record
+                .scope
+                .iter()
+                .any(|scope| scope == "automatic_delivery")
+            && approval
+                .record
+                .scope
+                .iter()
+                .any(|candidate| candidate == scope)
+            && approval.record.constraints.len() == constraints.len()
+            && approval.record.constraints.iter().collect::<BTreeSet<_>>() == expected
+    })
 }
 
 pub fn expected_deploy_resume_approval_token(plan: &DeployPlan, journal_id: &str) -> String {
@@ -725,6 +783,9 @@ pub fn resume_deploy_journal(
             journal.plan_id, plan.id
         ));
     }
+    if journal.plan_sha256.as_deref() != Some(deploy_plan_sha256(plan)?.as_str()) {
+        blockers.push("journal plan digest is missing or does not match the current plan; manual recovery is required".to_string());
+    }
     if journal.status != "failed" {
         blockers.push(format!(
             "only failed journals can be resumed; journal status is {}",
@@ -848,12 +909,14 @@ pub fn execute_deploy_resume(
     }
 
     let expected_scope = expected_deploy_resume_approval_scope(options.journal_id);
-    if !approved_scope_for_plan(options.approvals, &options.plan.id)
-        .iter()
-        .any(|scope| scope == &expected_scope)
-    {
+    if !has_bound_execution_approval(
+        options.approvals,
+        options.plan,
+        &expected_scope,
+        &deploy_resume_constraints(options.plan, options.journal_id)?,
+    ) {
         anyhow::bail!(
-            "deploy resume requires an approved approval record with scope {expected_scope}"
+            "deploy resume requires an approved approval record with scope {expected_scope} bound to the current plan and journal"
         );
     }
 
@@ -1010,6 +1073,20 @@ fn snapshot_gate(
             provided_id: Some(snapshot_id.to_string()),
             status: "mismatched_plan".to_string(),
             reason: Some("snapshot plan_id must match deploy plan id".to_string()),
+        }));
+    }
+
+    if manifest.plan_sha256.as_deref() != Some(deploy_plan_sha256(options.plan)?.as_str()) {
+        refusals.push(format!(
+            "snapshot {snapshot_id} is not bound to the current plan content"
+        ));
+        return Ok(Some(DeploySnapshotGate {
+            required: true,
+            provided_id: Some(snapshot_id.to_string()),
+            status: "mismatched_plan".to_string(),
+            reason: Some(
+                "snapshot plan digest is missing or changed; create a new snapshot".to_string(),
+            ),
         }));
     }
 
@@ -4873,6 +4950,64 @@ mod tests {
         DeployOptions, DeployStatus, deploy_operations, list_deploy_journals,
         managed_caddy_route_block, managed_systemd_service_content, plan_deploy,
     };
+
+    #[test]
+    fn execution_approval_requires_exact_content_snapshot_and_valid_expiry() -> Result<()> {
+        let plan = load_deploy_plan("tests/fixtures/plans/safe-production.yml".as_ref())?;
+        let constraints = super::deploy_execution_constraints(&plan, Some("synthetic-snapshot"))?;
+        let mut record: ApprovalRecord = serde_yaml::from_str(
+            "id: appr_bound\nplan_id: synthetic\nstatus: approved\nrequested_by: test\napproved_by: operator\nreason: reviewed synthetic plan\nscope: [deploy_execution]\n",
+        )?;
+        record.plan_id = plan.id.clone();
+        record.expires_at = Some(
+            (time::OffsetDateTime::now_utc() + time::Duration::days(1))
+                .format(&time::format_description::well_known::Rfc3339)?,
+        );
+        record.constraints = constraints.clone();
+        let approval = ApprovalFile {
+            path: "memory".into(),
+            effective_status: EffectiveApprovalStatus::Approved,
+            record,
+        };
+        let matches = |approval: &ApprovalFile, constraints: &[String]| {
+            super::has_bound_execution_approval(
+                std::slice::from_ref(approval),
+                &plan,
+                "deploy_execution",
+                constraints,
+            )
+        };
+        assert!(matches(&approval, &constraints));
+        assert!(!matches(
+            &approval,
+            &super::deploy_execution_constraints(&plan, Some("changed-snapshot"))?
+        ));
+        let mut changed_plan = plan.clone();
+        changed_plan.actor = "changed-review".into();
+        assert!(!matches(
+            &approval,
+            &super::deploy_execution_constraints(&changed_plan, Some("synthetic-snapshot"))?
+        ));
+        for expires_at in [
+            None,
+            Some("invalid".to_string()),
+            Some("2000-01-01T00:00:00Z".to_string()),
+        ] {
+            let mut expired = approval.clone();
+            expired.record.expires_at = expires_at;
+            assert!(!matches(&expired, &constraints));
+        }
+        let mut legacy = approval.clone();
+        legacy.record.constraints.clear();
+        assert!(!matches(&legacy, &constraints));
+        let mut extra = approval;
+        extra
+            .record
+            .constraints
+            .push("unreviewed-constraint".into());
+        assert!(!matches(&extra, &constraints));
+        Ok(())
+    }
 
     #[test]
     fn managed_systemd_deploy_orders_build_write_reload_enable_restart() -> Result<()> {

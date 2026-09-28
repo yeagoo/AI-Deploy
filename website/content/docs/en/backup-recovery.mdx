@@ -60,3 +60,9 @@ The restore directory must be inside a dedicated staging root and must not overl
 ## Scheduling
 
 Before enabling timers, pass repository read/write, consecutive backup, and representative restore gates. opsctl uses global serialization and deterministic schedule spreading to prevent long jobs from colliding.
+
+## Native database dump limits
+
+Native MySQL/MariaDB/PostgreSQL dumps default to a 3600-second deadline, 64 GiB byte limit, and a 256 MiB free-space reserve. Both plain SQL and zstd output remain streamed and private; timeout, overflow, nonzero exit, or insufficient space removes the temporary output. Compression also enforces the uncompressed input limit. Completion rechecks elapsed time after compression finalization and file synchronization. Blocking disk I/O can delay timeout reporting; the deadline is not a hard wall-clock bound on storage stalls.
+
+Operator process environment variables may set bounded limits: `OPSCTL_DUMP_TIMEOUT_SECONDS` (1–3600), `OPSCTL_DUMP_MAX_BYTES` (1 byte–1 TiB), and `OPSCTL_DUMP_MIN_FREE_BYTES` (1 byte–1 TiB). Invalid values fail closed.

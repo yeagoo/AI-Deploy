@@ -4,15 +4,15 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     path::Path,
-    process::{Command, Stdio},
+    process::{Child, Command, ExitStatus, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use wait_timeout::ChildExt;
 
 use crate::env_source;
@@ -76,40 +76,20 @@ fn capture_with_dir_and_env(
         command.env(name, value);
     }
 
-    let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("failed to run read-only command: {program}"))?;
-
-    let stdout_pipe = child
-        .stdout
-        .take()
-        .context("failed to capture command stdout")?;
-    let stdout_reader = thread::spawn(move || read_bounded(stdout_pipe));
-
-    let Some(status) = child
-        .wait_timeout(READ_ONLY_COMMAND_TIMEOUT)
-        .with_context(|| format!("failed to wait for read-only command: {program}"))?
-    else {
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = stdout_reader.join();
-        anyhow::bail!(
-            "read-only command timed out after {}s: {program}",
-            READ_ONLY_COMMAND_TIMEOUT.as_secs()
-        );
-    };
-
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| anyhow!("command stdout reader panicked: {program}"))?
-        .with_context(|| format!("failed to read command stdout: {program}"))?;
-
+    let mut stdout = CaptureBuffer::default();
+    let status = supervise(
+        &mut command,
+        None,
+        READ_ONLY_COMMAND_TIMEOUT,
+        |bytes| {
+            stdout.push(bytes);
+            Ok(())
+        },
+        |_| Ok(()),
+    )?;
     Ok(CapturedCommand {
         status_code: status.code(),
-        stdout,
+        stdout: stdout.finish(),
     })
 }
 
@@ -257,104 +237,76 @@ pub fn run_controlled_to_create_new_file_with_clean_env_timeout(
     for (name, value) in envs {
         command.env(name, value);
     }
-    let mut child = match command.spawn() {
-        Ok(child) => child,
-        Err(error) => {
-            drop(destination_file);
-            let _ = fs::remove_file(destination);
-            return Err(error)
-                .with_context(|| format!("failed to run controlled command: {program}"));
-        }
-    };
-    let stdout = match child.stdout.take() {
-        Some(stdout) => stdout,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            drop(destination_file);
-            let _ = fs::remove_file(destination);
-            anyhow::bail!("failed to capture controlled file command stdout");
-        }
-    };
-    let stderr = match child.stderr.take() {
-        Some(stderr) => stderr,
-        None => {
-            let _ = child.kill();
-            let _ = child.wait();
-            drop(stdout);
-            drop(destination_file);
-            let _ = fs::remove_file(destination);
-            anyhow::bail!("failed to capture controlled file command stderr");
-        }
-    };
-    let destination_path = destination.to_path_buf();
-    let writer = thread::spawn(move || -> std::io::Result<u64> {
-        let mut input = stdout.take(max_bytes + 1);
+    let result = (|| -> Result<ControlledFileCommand> {
         let mut output = destination_file;
-        let copied = std::io::copy(&mut input, &mut output)?;
-        output.sync_all()?;
-        if copied > max_bytes {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::FileTooLarge,
-                "controlled file command exceeded its byte limit",
-            ));
+        let mut bytes_written = 0_u64;
+        let status = supervise(
+            &mut command,
+            None,
+            timeout,
+            |bytes| {
+                bytes_written += bytes.len() as u64;
+                if bytes_written > max_bytes {
+                    anyhow::bail!("controlled file command exceeded its byte limit");
+                }
+                output
+                    .write_all(bytes)
+                    .context("failed to write controlled command destination")?;
+                Ok(())
+            },
+            |_| Ok(()),
+        )?;
+        if !status.success() {
+            anyhow::bail!("controlled file command returned a nonzero status");
         }
-        Ok(copied)
-    });
-    let stderr_reader = thread::spawn(move || read_bounded(stderr));
+        output
+            .sync_all()
+            .context("failed to sync controlled command destination")?;
+        Ok(ControlledFileCommand { bytes_written })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(destination);
+    }
+    result
+}
 
-    let status = match child.wait_timeout(timeout) {
-        Ok(Some(status)) => status,
-        Ok(None) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = writer.join();
-            let _ = stderr_reader.join();
-            let _ = fs::remove_file(&destination_path);
-            anyhow::bail!(
-                "controlled command timed out after {}s: {program}",
-                timeout.as_secs()
-            );
-        }
-        Err(error) => {
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = writer.join();
-            let _ = stderr_reader.join();
-            let _ = fs::remove_file(&destination_path);
-            return Err(error)
-                .with_context(|| format!("failed to wait for controlled command: {program}"));
-        }
-    };
-    let bytes_written = match writer.join() {
-        Ok(Ok(bytes)) => bytes,
-        Ok(Err(error)) => {
-            let _ = stderr_reader.join();
-            let _ = fs::remove_file(&destination_path);
-            return Err(error).context("failed to write controlled command destination");
-        }
-        Err(_) => {
-            let _ = stderr_reader.join();
-            let _ = fs::remove_file(&destination_path);
-            anyhow::bail!("controlled file command writer panicked: {program}");
-        }
-    };
-    match stderr_reader.join() {
-        Ok(Ok(_)) => {}
-        Ok(Err(error)) => {
-            let _ = fs::remove_file(&destination_path);
-            return Err(error).context("failed to read controlled file command stderr");
-        }
-        Err(_) => {
-            let _ = fs::remove_file(&destination_path);
-            anyhow::bail!("controlled file command stderr reader panicked: {program}");
-        }
+/// Stream trusted, planner-generated command output with one process/I/O deadline.
+/// Diagnostics are discarded so database output cannot leak into reports.
+pub fn run_controlled_stream_timeout(
+    program: &str,
+    args: &[String],
+    max_bytes: u64,
+    timeout: Duration,
+    mut output: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<()> {
+    if max_bytes == 0 || timeout.is_zero() || timeout > CONTROLLED_COMMAND_TIMEOUT {
+        anyhow::bail!("invalid controlled stream resource limits");
     }
+    let mut command = Command::new(program);
+    command.args(args);
+    if let Some(path) = controlled_path() {
+        command.env("PATH", path);
+    }
+    let mut bytes_read = 0_u64;
+    let status = supervise(
+        &mut command,
+        None,
+        timeout,
+        |bytes| {
+            bytes_read = bytes_read
+                .checked_add(bytes.len() as u64)
+                .context("stream byte count overflow")?;
+            if bytes_read > max_bytes {
+                anyhow::bail!("controlled stream exceeded its byte limit");
+            }
+            output(bytes)
+        },
+        |_| Ok(()),
+    )?;
     if !status.success() {
-        let _ = fs::remove_file(&destination_path);
-        anyhow::bail!("controlled file command returned a nonzero status");
+        anyhow::bail!("controlled stream command returned a nonzero status");
     }
-    Ok(ControlledFileCommand { bytes_written })
+    Ok(())
 }
 
 fn run_controlled_with_dir_and_env(
@@ -396,74 +348,224 @@ fn run_controlled_with_dir_env_and_input(
         command.env(name, value);
     }
 
-    let mut child = command
+    let mut stdout = CaptureBuffer::default();
+    let mut stderr = CaptureBuffer::default();
+    let status = supervise(
+        &mut command,
+        input,
+        timeout,
+        |bytes| {
+            stdout.push(bytes);
+            Ok(())
+        },
+        |bytes| {
+            stderr.push(bytes);
+            Ok(())
+        },
+    )?;
+    Ok(ControlledCommand {
+        status_code: status.code(),
+        stdout: stdout.finish(),
+        stderr: stderr.finish(),
+    })
+}
+
+#[derive(Default)]
+struct CaptureBuffer {
+    bytes: Vec<u8>,
+    truncated: bool,
+}
+
+impl CaptureBuffer {
+    fn push(&mut self, bytes: &[u8]) {
+        let remaining = (MAX_CAPTURE_BYTES as usize).saturating_sub(self.bytes.len());
+        self.bytes
+            .extend_from_slice(&bytes[..bytes.len().min(remaining)]);
+        self.truncated |= bytes.len() > remaining;
+    }
+
+    fn finish(mut self) -> String {
+        if self.truncated {
+            self.bytes
+                .extend_from_slice(b"\n[opsctl output truncated]\n");
+        }
+        String::from_utf8_lossy(&self.bytes).into_owned()
+    }
+}
+
+// Independent nonblocking pipes prevent descendants, blocked stdin and output
+// backpressure from outliving the caller's deadline. No worker thread is joined.
+#[cfg(unix)]
+fn supervise(
+    command: &mut Command,
+    input: Option<&[u8]>,
+    timeout: Duration,
+    mut stdout_sink: impl FnMut(&[u8]) -> Result<()>,
+    mut stderr_sink: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<ExitStatus> {
+    use std::os::unix::process::CommandExt;
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .context("command deadline overflow")?;
+    command
+        .process_group(0)
         .stdin(if input.is_some() {
             Stdio::piped()
         } else {
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| format!("failed to run controlled command: {program}"))?;
-
-    if let Some(input) = input
-        && let Some(mut stdin) = child.stdin.take()
-    {
-        stdin
-            .write_all(input)
-            .with_context(|| format!("failed to write command stdin: {program}"))?;
-    }
-
-    let stdout_pipe = child
-        .stdout
-        .take()
-        .context("failed to capture command stdout")?;
-    let stderr_pipe = child
-        .stderr
-        .take()
-        .context("failed to capture command stderr")?;
-    let stdout_reader = thread::spawn(move || read_bounded(stdout_pipe));
-    let stderr_reader = thread::spawn(move || read_bounded(stderr_pipe));
-
-    let Some(status) = child
-        .wait_timeout(timeout)
-        .with_context(|| format!("failed to wait for controlled command: {program}"))?
-    else {
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = stdout_reader.join();
-        let _ = stderr_reader.join();
-        anyhow::bail!(
-            "controlled command timed out after {}s: {program}",
-            timeout.as_secs()
-        );
+        .stderr(Stdio::piped());
+    let mut guard = ProcessGuard {
+        child: command
+            .spawn()
+            .context("failed to start supervised command")?,
+        complete: false,
     };
-
-    let stdout = stdout_reader
-        .join()
-        .map_err(|_| anyhow!("command stdout reader panicked: {program}"))?
-        .with_context(|| format!("failed to read command stdout: {program}"))?;
-    let stderr = stderr_reader
-        .join()
-        .map_err(|_| anyhow!("command stderr reader panicked: {program}"))?
-        .with_context(|| format!("failed to read command stderr: {program}"))?;
-
-    Ok(ControlledCommand {
-        status_code: status.code(),
-        stdout,
-        stderr,
-    })
+    let mut stdout = Some(
+        guard
+            .child
+            .stdout
+            .take()
+            .context("missing command stdout")?,
+    );
+    let mut stderr = Some(
+        guard
+            .child
+            .stderr
+            .take()
+            .context("missing command stderr")?,
+    );
+    let mut stdin = guard.child.stdin.take();
+    nonblocking(stdout.as_ref().context("missing command stdout")?)?;
+    nonblocking(stderr.as_ref().context("missing command stderr")?)?;
+    if let Some(stdin) = &stdin {
+        nonblocking(stdin)?;
+    }
+    let mut input = input.unwrap_or_default();
+    let mut status = None;
+    loop {
+        if Instant::now() >= deadline {
+            anyhow::bail!("controlled command timed out after {}s", timeout.as_secs());
+        }
+        let mut progressed = drain_pipe(&mut stdout, &mut stdout_sink)?;
+        progressed |= drain_pipe(&mut stderr, &mut stderr_sink)?;
+        // A synchronous sink can return after the deadline. Never report success
+        // or send more input after an overrun, even if the child already exited.
+        if Instant::now() >= deadline {
+            anyhow::bail!("controlled command timed out after {}s", timeout.as_secs());
+        }
+        if input.is_empty() {
+            stdin = None;
+        }
+        if let Some(pipe) = &mut stdin {
+            match pipe.write(&input[..input.len().min(64 * 1024)]) {
+                Ok(0) => anyhow::bail!("command stdin closed before input was written"),
+                Ok(bytes) => {
+                    input = &input[bytes..];
+                    progressed = true;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error).context("failed to write command stdin"),
+            }
+        }
+        if status.is_none() {
+            status = guard
+                .child
+                .try_wait()
+                .context("failed to wait for supervised command")?;
+        }
+        if let Some(status) = status
+            && stdout.is_none()
+            && stderr.is_none()
+            && stdin.is_none()
+        {
+            guard.complete = true;
+            return Ok(status);
+        }
+        if !progressed {
+            thread::sleep(
+                deadline
+                    .saturating_duration_since(Instant::now())
+                    .min(Duration::from_millis(10)),
+            );
+        }
+    }
 }
 
-fn read_bounded(reader: impl Read) -> std::io::Result<String> {
-    let mut bytes = Vec::new();
-    reader.take(MAX_CAPTURE_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_CAPTURE_BYTES {
-        bytes.truncate(MAX_CAPTURE_BYTES as usize);
-        bytes.extend_from_slice(b"\n[opsctl output truncated]\n");
+#[cfg(not(unix))]
+fn supervise(
+    _command: &mut Command,
+    _input: Option<&[u8]>,
+    _timeout: Duration,
+    _stdout_sink: impl FnMut(&[u8]) -> Result<()>,
+    _stderr_sink: impl FnMut(&[u8]) -> Result<()>,
+) -> Result<ExitStatus> {
+    anyhow::bail!("bounded command supervision requires Unix")
+}
+
+#[cfg(unix)]
+fn nonblocking(fd: &impl std::os::fd::AsFd) -> Result<()> {
+    let flags = rustix::fs::fcntl_getfl(fd)?;
+    rustix::fs::fcntl_setfl(fd, flags | rustix::fs::OFlags::NONBLOCK)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn drain_pipe(
+    pipe: &mut Option<impl Read>,
+    sink: &mut impl FnMut(&[u8]) -> Result<()>,
+) -> Result<bool> {
+    let Some(reader) = pipe else {
+        return Ok(false);
+    };
+    let mut bytes = [0_u8; 64 * 1024];
+    match reader.read(&mut bytes) {
+        Ok(0) => {
+            *pipe = None;
+            Ok(true)
+        }
+        Ok(count) => {
+            sink(&bytes[..count])?;
+            Ok(true)
+        }
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+            ) =>
+        {
+            Ok(false)
+        }
+        Err(error) => Err(error).context("failed to read supervised command output"),
     }
-    Ok(String::from_utf8_lossy(&bytes).into_owned())
+}
+
+#[cfg(unix)]
+struct ProcessGuard {
+    child: Child,
+    complete: bool,
+}
+
+#[cfg(unix)]
+impl Drop for ProcessGuard {
+    fn drop(&mut self) {
+        if !self.complete {
+            if let Ok(raw_pid) = i32::try_from(self.child.id())
+                && raw_pid > 1
+                && let Some(pid) = rustix::process::Pid::from_raw(raw_pid)
+            {
+                let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+            }
+            let _ = self.child.kill();
+            // A bounded reap also covers errors during pipe setup and sink writes.
+            let _ = self.child.wait_timeout(Duration::from_secs(1));
+        }
+    }
 }
 
 fn controlled_path() -> Option<OsString> {
@@ -489,7 +591,11 @@ impl ControlledCommand {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::BTreeSet, ffi::OsString, time::Duration};
+    use std::{
+        collections::BTreeSet,
+        ffi::OsString,
+        time::{Duration, Instant},
+    };
 
     use anyhow::Result;
 
@@ -498,6 +604,101 @@ mod tests {
         run_controlled_to_create_new_file_with_clean_env_timeout,
         run_controlled_with_clean_env_in_dir,
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_covers_inherited_output_after_parent_exit() -> Result<()> {
+        for script in ["sleep 10 & wait", "sleep 10 & exit 0"] {
+            let started = Instant::now();
+            let result = super::run_controlled_timeout(
+                "/bin/sh",
+                &["-c".into(), script.into()],
+                Duration::from_millis(200),
+            );
+            assert!(result.is_err());
+            assert!(started.elapsed() < Duration::from_secs(2));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn slow_output_sink_cannot_report_success_after_deadline() -> Result<()> {
+        let mut command = std::process::Command::new("/bin/sh");
+        command.args(["-c", "printf output"]);
+        let result = super::supervise(
+            &mut command,
+            None,
+            Duration::from_millis(200),
+            |_| {
+                std::thread::sleep(Duration::from_millis(250));
+                Ok(())
+            },
+            |_| Ok(()),
+        );
+        let error = result
+            .err()
+            .ok_or_else(|| anyhow::anyhow!("late sink succeeded"))?;
+        assert!(error.to_string().contains("timed out"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_covers_blocked_stdin() -> Result<()> {
+        let started = Instant::now();
+        let result = super::run_controlled_with_dir_env_and_input(
+            "/bin/sh",
+            &["-c".into(), "sleep 10".into()],
+            None,
+            &[],
+            Some(&vec![b'x'; 256 * 1024]),
+            Duration::from_millis(200),
+            false,
+        );
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_and_output_backpressure_are_drained_together() -> Result<()> {
+        let input = vec![b'x'; 256 * 1024];
+        let result = super::run_controlled_with_dir_env_and_input(
+            "/bin/sh",
+            &["-c".into(), "head -c 131072 /dev/zero; cat".into()],
+            None,
+            &[],
+            Some(&input),
+            Duration::from_secs(3),
+            false,
+        )?;
+        assert!(result.success());
+        assert_eq!(result.stdout.len(), 131072 + input.len());
+        assert!(result.stdout.ends_with(&String::from_utf8(input)?));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn file_capture_timeout_removes_partial_output() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let destination = temp.path().join("timed-out.bin");
+        let started = Instant::now();
+        let result = super::run_controlled_to_create_new_file_with_clean_env_timeout(
+            "/bin/sh",
+            &["-c".into(), "printf partial; sleep 10 & wait".into()],
+            &[],
+            &destination,
+            64,
+            Duration::from_millis(200),
+        );
+        assert!(result.is_err());
+        assert!(!destination.exists());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        Ok(())
+    }
 
     #[test]
     fn controlled_command_can_run_in_working_directory() -> Result<()> {

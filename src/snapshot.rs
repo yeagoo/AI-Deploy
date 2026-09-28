@@ -43,6 +43,8 @@ pub struct SnapshotOptions<'a> {
 pub struct SnapshotManifest {
     pub id: String,
     pub plan_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plan_sha256: Option<String>,
     pub created_at: String,
     pub status: String,
     pub scope: Vec<String>,
@@ -449,6 +451,7 @@ pub(crate) fn create_snapshot_with_caddyfile(
     let mut manifest = SnapshotManifest {
         id: snapshot_id.clone(),
         plan_id: options.plan.id.clone(),
+        plan_sha256: Some(crate::deploy::deploy_plan_sha256(options.plan)?),
         created_at,
         status: if limitations.is_empty() {
             "complete".to_string()

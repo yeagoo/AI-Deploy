@@ -1651,6 +1651,68 @@ history: []
     assert!(backups_yml.contains("repository_checks:"));
     assert!(backups_yml.contains("check-restic-test-"));
 
+    for (script, limit_name, limit_value) in [
+        (
+            "#!/bin/sh\nprintf oversized\n",
+            "OPSCTL_DUMP_MAX_BYTES",
+            "3",
+        ),
+        (
+            "#!/bin/sh\nprintf partial\nsleep 10 & wait\n",
+            "OPSCTL_DUMP_TIMEOUT_SECONDS",
+            "1",
+        ),
+        (
+            "#!/bin/sh\nprintf unused\n",
+            "OPSCTL_DUMP_MIN_FREE_BYTES",
+            "0",
+        ),
+    ] {
+        write_executable_script(&pg_dump, script)?;
+        let started = std::time::Instant::now();
+        let output = opsctl_cmd()?
+            .env("OPSCTL_RESTIC_BIN", &restic)
+            .env("OPSCTL_PG_DUMP_BIN", &pg_dump)
+            .env("OPSCTL_TEST_RESTIC_PASSWORD_SET", "secret")
+            .env("OPSCTL_TEST_AWS_ACCESS_KEY_ID", "access")
+            .env(limit_name, limit_value)
+            .args([
+                "--state-dir",
+                &state_dir_arg,
+                "--registry",
+                &registry_arg,
+                "backup",
+                "run",
+                "pcafev2",
+                "--execute",
+                "--json",
+            ])
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        assert!(started.elapsed() < std::time::Duration::from_secs(4));
+        let value: Value = serde_json::from_slice(&output)?;
+        assert_eq!(value["schema_version"], "opsctl.v1");
+        assert_eq!(value["data"]["status"], "failed");
+        let operations = value["data"]["targets"][0]["operations"]
+            .as_array()
+            .context("missing operations")?;
+        assert!(operations.iter().any(
+            |operation| operation["kind"] == "database_dump" && operation["status"] == "failed"
+        ));
+        assert!(
+            !operations
+                .iter()
+                .any(|operation| operation["kind"] == "restic_backup")
+        );
+        assert!(!dump_path.exists());
+        assert!(std::fs::read_dir(data_dir.path())?.all(|entry| {
+            entry.is_ok_and(|entry| !entry.file_name().to_string_lossy().ends_with(".tmp"))
+        }));
+    }
+
     Ok(())
 }
 
@@ -8510,6 +8572,95 @@ fn deploy_dry_run_with_snapshot_returns_typed_operations_json() -> Result<()> {
     assert_json_array_contains_string(&compose_operation["argv"], "--project-name")?;
     assert_json_array_contains_string(&compose_operation["argv"], "phase4-safe")?;
 
+    let changed_plan = state_dir.path().join("changed-plan.yml");
+    let mut plan: serde_yaml::Value = serde_yaml::from_str(&std::fs::read_to_string(
+        "tests/fixtures/plans/safe-production.yml",
+    )?)?;
+    plan["actor"] = serde_yaml::Value::String("changed-after-snapshot".to_string());
+    std::fs::write(&changed_plan, serde_yaml::to_string(&plan)?)?;
+    let changed_output = opsctl_cmd()?
+        .arg("--state-dir")
+        .arg(state_dir.path())
+        .arg("deploy")
+        .arg(&changed_plan)
+        .args(["--dry-run", "--snapshot", snapshot_id, "--json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let changed: Value = serde_json::from_slice(&changed_output)?;
+    assert_eq!(changed["data"]["snapshot"]["status"], "mismatched_plan");
+
+    Ok(())
+}
+
+#[test]
+fn deploy_execution_rejects_unbound_and_changed_same_id_plan() -> Result<()> {
+    let state = TempDir::new()?;
+    let registry = TempDir::new()?;
+    let project = TempDir::new()?;
+    copy_example_registry(registry.path())?;
+    let plan_path = project.path().join("deploy.yml");
+    let plan = format!(
+        "id: deploy_reviewed\nactor: tester\nproject_root: {}\nintent: deploy\nenvironment: staging\nchanges:\n  ports:\n    reserve: [41021]\n  destructive_ops: []\nsnapshot_required: false\n",
+        project.path().display()
+    );
+    std::fs::write(&plan_path, &plan)?;
+    write_approval(
+        registry.path(),
+        "appr_legacy",
+        "deploy_reviewed",
+        "approved",
+        "deploy_execution",
+    )?;
+    let execute = || -> Result<assert_cmd::Command> {
+        let mut cmd = opsctl_cmd()?;
+        cmd.arg("--state-dir")
+            .arg(state.path())
+            .arg("--registry")
+            .arg(registry.path())
+            .arg("deploy")
+            .arg(&plan_path)
+            .args([
+                "--execute",
+                "--approval-token",
+                "deploy:deploy_reviewed",
+                "--json",
+            ]);
+        Ok(cmd)
+    };
+    let unbound = execute()?.assert().failure().get_output().stdout.clone();
+    let value: Value = serde_json::from_slice(&unbound)?;
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("bound to the current plan"))
+    );
+    approve_deploy(state.path(), registry.path(), &plan_path)?;
+    std::fs::write(&plan_path, plan.replace("41021", "41022"))?;
+    // The modified plan still passes policy; rejection must come from approval binding.
+    opsctl_cmd()?
+        .arg("--state-dir")
+        .arg(state.path())
+        .arg("--registry")
+        .arg(registry.path())
+        .arg("deploy")
+        .arg(&plan_path)
+        .args(["--dry-run", "--json"])
+        .assert()
+        .success();
+    let changed = execute()?.assert().failure().get_output().stdout.clone();
+    let value: Value = serde_json::from_slice(&changed)?;
+    assert!(
+        value["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("bound to the current plan"))
+    );
+    assert!(!state.path().join("deploy-journals").exists());
+    let ports = std::fs::read_to_string(registry.path().join("ports.yml"))?;
+    assert!(!ports.contains("41021"));
+    assert!(!ports.contains("41022"));
     Ok(())
 }
 
@@ -8564,13 +8715,7 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
-        registry_dir.path(),
-        "appr_deploy_registry_write",
-        "deploy_registry_write",
-        "approved",
-        "deploy_execution",
-    )?;
+    approve_deploy(state_dir.path(), registry_dir.path(), &plan_path)?;
 
     let execute_output = opsctl_cmd()?
         .args([
@@ -8809,13 +8954,7 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
-        registry_dir.path(),
-        "appr_deploy_compose_exec",
-        "deploy_compose_exec",
-        "approved",
-        "deploy_execution",
-    )?;
+    approve_deploy(state_dir.path(), registry_dir.path(), &plan_path)?;
 
     opsctl_cmd()?
         .env("OPSCTL_DOCKER_BIN", &fake_docker)
@@ -8908,13 +9047,7 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
-        registry_dir.path(),
-        "appr_deploy_compose_resume",
-        "deploy_compose_resume",
-        "approved",
-        "deploy_execution",
-    )?;
+    approve_deploy(state_dir.path(), registry_dir.path(), &plan_path)?;
 
     let failed_output = opsctl_cmd()?
         .env("OPSCTL_DOCKER_BIN", &fake_docker)
@@ -8940,6 +9073,33 @@ preflight:
     let journal_id = failed_value["data"]["execution"]["journal_id"]
         .as_str()
         .context("failed deploy should include journal id")?;
+
+    let original_plan = std::fs::read_to_string(&plan_path)?;
+    std::fs::write(
+        &plan_path,
+        original_plan.replace("actor: tester", "actor: changed-after-journal"),
+    )?;
+    let changed_output = opsctl_cmd()?
+        .arg("--state-dir")
+        .arg(state_dir.path())
+        .arg("--registry")
+        .arg(registry_dir.path())
+        .arg("deploy-resume")
+        .arg(&plan_path)
+        .args(["--journal", journal_id, "--dry-run", "--json"])
+        .assert()
+        .failure()
+        .get_output()
+        .stdout
+        .clone();
+    let changed: Value = serde_json::from_slice(&changed_output)?;
+    assert_eq!(changed["data"]["can_resume"], false);
+    assert!(changed["data"]["blockers"].as_array().is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| item.as_str().is_some_and(|text| text.contains("digest")))
+    }));
+    std::fs::write(&plan_path, original_plan)?;
 
     let resume_output = opsctl_cmd()?
         .args([
@@ -9106,13 +9266,7 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
-        registry_dir.path(),
-        "appr_deploy_mcp_resume",
-        "deploy_mcp_resume",
-        "approved",
-        "deploy_execution",
-    )?;
+    approve_deploy(state_dir.path(), registry_dir.path(), &plan_path)?;
     let failed_output = opsctl_cmd()?
         .env("OPSCTL_DOCKER_BIN", &fake_docker)
         .args([
@@ -9312,13 +9466,7 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
-        registry_dir.path(),
-        "appr_deploy_migration_exec",
-        "deploy_migration_exec",
-        "approved",
-        "deploy_execution",
-    )?;
+    approve_deploy(state_dir.path(), registry_dir.path(), &plan_path)?;
 
     opsctl_cmd()?
         .env("OPSCTL_NPM_BIN", &fake_npm)
@@ -9431,13 +9579,7 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
-        registry_dir.path(),
-        "appr_deploy_adapters_exec",
-        "deploy_adapters_exec",
-        "approved",
-        "deploy_execution",
-    )?;
+    approve_deploy(state_dir.path(), registry_dir.path(), &plan_path)?;
 
     opsctl_cmd()?
         .env("OPSCTL_NPM_BIN", &fake_npm)
@@ -9544,12 +9686,11 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
+    approve_deploy_with_env(
+        state_dir.path(),
         registry_dir.path(),
-        "appr_deploy_static_site_exec",
-        "deploy_static_site_exec",
-        "approved",
-        "deploy_execution",
+        &plan_path,
+        &[("OPSCTL_STATIC_SITE_ROOTS", static_root.path())],
     )?;
 
     opsctl_cmd()?
@@ -9692,12 +9833,11 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
+    approve_deploy_with_env(
+        state_dir.path(),
         registry_dir.path(),
-        "appr_deploy_health_exec",
-        "deploy_health_exec",
-        "approved",
-        "deploy_execution",
+        &plan_path,
+        &[("OPSCTL_STATIC_SITE_ROOTS", static_root.path())],
     )?;
 
     let output = opsctl_cmd()?
@@ -9810,13 +9950,7 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
-        registry_dir.path(),
-        "appr_deploy_health_fail",
-        "deploy_health_fail",
-        "approved",
-        "deploy_execution",
-    )?;
+    approve_deploy(state_dir.path(), registry_dir.path(), &plan_path)?;
 
     let output = opsctl_cmd()?
         .env("OPSCTL_HEALTH_RETRIES", "1")
@@ -9941,13 +10075,7 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
-        registry_dir.path(),
-        "appr_deploy_caddy_exec",
-        "deploy_caddy_exec",
-        "approved",
-        "deploy_execution",
-    )?;
+    approve_deploy(state_dir.path(), registry_dir.path(), &plan_path)?;
 
     opsctl_cmd()?
         .env("OPSCTL_CADDYFILE_PATH", &caddyfile)
@@ -10043,13 +10171,7 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
-        registry_dir.path(),
-        "appr_deploy_typed_file_exec",
-        "deploy_typed_file_exec",
-        "approved",
-        "deploy_execution",
-    )?;
+    approve_deploy(state_dir.path(), registry_dir.path(), &plan_path)?;
 
     opsctl_cmd()?
         .env("OPSCTL_CADDYFILE_PATH", &caddyfile)
@@ -10378,13 +10500,7 @@ preflight:
     let token = dry_run_value["data"]["execution_approval_token"]
         .as_str()
         .context("deploy dry-run should print execution token")?;
-    write_approval(
-        registry_dir.path(),
-        "appr_deploy_helper_exec",
-        "deploy_helper_exec",
-        "approved",
-        "deploy_execution",
-    )?;
+    approve_deploy(state_dir.path(), registry_dir.path(), &plan_path)?;
     let compose_order = dry_run_value["data"]["operations"]
         .as_array()
         .context("operations should be an array")?
@@ -10479,13 +10595,7 @@ preflight:
         .and_then(|operation| operation["order"].as_u64())
         .context("RunBuild order should be present")?
         .to_string();
-    write_approval(
-        registry_dir.path(),
-        "appr_deploy_helper_build",
-        "deploy_helper_build",
-        "approved",
-        "deploy_execution",
-    )?;
+    approve_deploy(state_dir.path(), registry_dir.path(), &plan_path)?;
 
     let failure = opsctl_cmd()?
         .args([
@@ -13155,6 +13265,48 @@ fn write_executable_script(path: &Path, contents: &str) -> Result<()> {
     Ok(())
 }
 
+fn approve_deploy(state: &Path, registry: &Path, plan: &Path) -> Result<()> {
+    approve_deploy_with_env(state, registry, plan, &[])
+}
+
+fn approve_deploy_with_env(
+    state: &Path,
+    registry: &Path,
+    plan: &Path,
+    envs: &[(&str, &Path)],
+) -> Result<()> {
+    let mut cmd = opsctl_cmd()?;
+    for (name, value) in envs {
+        cmd.env(name, value);
+    }
+    let output = cmd
+        .arg("--state-dir")
+        .arg(state)
+        .arg("--registry")
+        .arg(registry)
+        .arg("request-deploy-execution")
+        .arg(plan)
+        .args(["--reason", "reviewed synthetic deployment", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let value: Value = serde_json::from_slice(&output)?;
+    let id = value["data"]["approval"]["id"]
+        .as_str()
+        .context("missing execution approval id")?;
+    opsctl_cmd()?
+        .arg("--state-dir")
+        .arg(state)
+        .arg("--registry")
+        .arg(registry)
+        .args(["approve", id, "--json"])
+        .assert()
+        .success();
+    Ok(())
+}
+
 fn write_approval(
     registry: &Path,
     id: &str,
@@ -14055,6 +14207,8 @@ fn project_git_trigger_is_dry_run_by_default_and_idempotently_queues() -> Result
 
 #[test]
 fn project_delivery_requires_then_accepts_exact_constrained_authorization() -> Result<()> {
+    let expires_at = (time::OffsetDateTime::now_utc() + time::Duration::days(1))
+        .format(&time::format_description::well_known::Rfc3339)?;
     let project = TempDir::new()?;
     let state = TempDir::new()?;
     let registry = TempDir::new()?;
@@ -14150,7 +14304,7 @@ fn project_delivery_requires_then_accepts_exact_constrained_authorization() -> R
             "--reason",
             "reviewed automatic stateless delivery",
             "--expires-at",
-            "2026-08-01T00:00:00Z",
+            &expires_at,
             "--json",
         ])
         .assert()
@@ -14200,6 +14354,71 @@ fn project_delivery_requires_then_accepts_exact_constrained_authorization() -> R
     assert_eq!(authorized["data"]["status"], "ready");
     assert_eq!(authorized["data"]["authorization_id"], approval_id);
     assert!(!state.path().join("git-deliveries").exists());
+
+    let approval_path = registry
+        .path()
+        .join("approvals")
+        .join(format!("{approval_id}.yml"));
+    let original: serde_yaml::Value =
+        serde_yaml::from_str(&std::fs::read_to_string(&approval_path)?)?;
+    let past = (time::OffsetDateTime::now_utc() - time::Duration::seconds(1))
+        .format(&time::format_description::well_known::Rfc3339)?;
+    for (field, value) in [
+        ("expires_at", None),
+        ("expires_at", Some("invalid")),
+        ("expires_at", Some(past.as_str())),
+        ("approved_by", None),
+        ("approved_by", Some("")),
+        ("approved_by", Some(" \t")),
+        ("approved_by", Some("operator")),
+        ("status", Some("rejected")),
+    ] {
+        let mut invalid = original.clone();
+        let mapping = invalid
+            .as_mapping_mut()
+            .context("approval must be a mapping")?;
+        let key = serde_yaml::Value::String(field.to_string());
+        if let Some(value) = value {
+            mapping.insert(key, serde_yaml::Value::String(value.to_string()));
+        } else {
+            mapping.remove(&key);
+        }
+        std::fs::write(&approval_path, serde_yaml::to_string(&invalid)?)?;
+        let output = opsctl_cmd()?
+            .args(common)
+            .assert()
+            .code(3)
+            .get_output()
+            .stdout
+            .clone();
+        let rejected: Value = serde_json::from_slice(&output)?;
+        assert_eq!(rejected["data"]["status"], "authorization_required");
+        assert!(rejected["data"]["authorization_id"].is_null());
+
+        let execute_args = common.map(|arg| if arg == "--dry-run" { "--execute" } else { arg });
+        let output = opsctl_cmd()?
+            .env("OPSCTL_PNPM_BIN", "/usr/bin/false")
+            .env("OPSCTL_SYSTEMCTL_BIN", "/usr/bin/false")
+            .args(execute_args)
+            .assert()
+            .failure()
+            .get_output()
+            .stdout
+            .clone();
+        let rejected: Value = serde_json::from_slice(&output)?;
+        assert!(
+            rejected
+                .to_string()
+                .contains("automatic delivery is not authorized")
+        );
+        for directory in ["git-deliveries", "snapshots", "deploy-journals"] {
+            assert!(
+                !state.path().join(directory).exists(),
+                "unexpected {directory}"
+            );
+        }
+    }
+    std::fs::write(&approval_path, serde_yaml::to_string(&original)?)?;
     Ok(())
 }
 

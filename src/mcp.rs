@@ -1269,11 +1269,7 @@ fn request_deploy_execution_tool(
 
     let execution_token = expected_deploy_approval_token(&plan, snapshot_id);
     let scope = vec!["deploy_execution".to_string()];
-    let constraints = vec![
-        format!("plan_id={}", plan.id),
-        format!("execution_approval_token={execution_token}"),
-        "execution must happen outside MCP through opsctl deploy --execute or opsctl helper run-deploy-operation".to_string(),
-    ];
+    let constraints = crate::deploy::deploy_execution_constraints(&plan, snapshot_id)?;
     let approval = request_approval(&ApprovalRequestOptions {
         registry_root: &options.paths.registry_dir,
         plan_id: &plan.id,

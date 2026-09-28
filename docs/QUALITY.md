@@ -46,6 +46,12 @@ The failure-matrix gate always runs the signed evidence-archive Restic E2E when 
 
 For 0.6.1 and later, the Debian container test also verifies that the installed scheduled-backup service opts into the bounded lock queue and that its timer uses deterministic delay spreading. Run `systemd-analyze verify packaging/systemd/*.service packaging/systemd/*.timer` before packaging to validate unit syntax and dependencies.
 
+## Execution-boundary regressions
+
+Local tests cover same-id plan changes invalidating execution approval, snapshot digest mismatches, resume digest mismatches, inherited child pipes after both timeout and parent exit, blocked stdin, simultaneous input/output backpressure, native dump timeout/overflow/nonzero cleanup for plain and zstd output, free-space refusal, and bounded audit-line/error output. Time-sensitive authorization fixtures use current-time-relative expiry; expiry-policy rejection stays enforced.
+
+CI checks each shell script separately and runs the full bilingual documentation check with a frozen Bun lockfile. `bash -n scripts/*.sh` checks only the first script and must not be used as the aggregate syntax gate. For local syntax checks, use `for script in scripts/*.sh; do bash -n "$script" || exit; done`.
+
 ## Current Lint Policy
 
 `Cargo.toml` forbids unsafe code and warns on patterns that are risky for a safety tool:

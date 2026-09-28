@@ -60,3 +60,9 @@ opsctl backup restore-plan <service-id> \
 ## 定时任务
 
 启用 timer 前先通过仓库读写、连续备份和代表性恢复门禁。opsctl 使用全局串行锁与确定性时间分散，避免多个长任务同时争用仓库。
+
+## 原生数据库 dump 限制
+
+原生 MySQL/MariaDB/PostgreSQL dump 默认使用 3600 秒截止时间、64 GiB 字节上限和 256 MiB 剩余空间保留量。普通 SQL 与 zstd 输出都保持流式处理和私有权限；超时、超限、非零退出或空间不足时会删除临时输出。压缩流程同时限制未压缩输入的大小。压缩收尾和文件同步完成后会再次检查总耗时。磁盘 I/O 阻塞可能延迟超时报告，截止时间并非存储阻塞情况下的严格墙钟上限。
+
+运维人员可通过进程环境变量设置有界限制：`OPSCTL_DUMP_TIMEOUT_SECONDS`（1–3600）、`OPSCTL_DUMP_MAX_BYTES`（1 字节–1 TiB）和 `OPSCTL_DUMP_MIN_FREE_BYTES`（1 字节–1 TiB）。无效参数会阻止执行。

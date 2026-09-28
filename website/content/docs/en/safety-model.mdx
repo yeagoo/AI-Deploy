@@ -26,7 +26,11 @@ opsctl backup run <service-id> --json
 
 ## Approval is not a universal token
 
-Valid approval binds a plan, risk scope, approver, and expiry. “Approve everything” cannot satisfy execution gates. Execution recalculates current readiness so a stale preflight result cannot be reused.
+Valid approval binds a plan, risk scope, approver, and expiry. “Approve everything” cannot satisfy execution gates. Execution recalculates current readiness so a stale preflight result cannot be reused. Automatic delivery uses the same explicit expiry and nonempty approver checks before creating a queue; missing or malformed expiry and blank or self-approved identities cannot report readiness.
+
+Execution approvals bind the normalized plan SHA-256 and exact snapshot identity. Editing a plan while keeping its ID requires a new reviewed execution approval and, when required, a new snapshot. Legacy approvals and snapshots remain readable, but missing content bindings cannot authorize deployment. Resume also checks the journal plan digest and a separately approved journal scope.
+
+Controlled commands share one deadline across process waiting and stdin/stdout/stderr. Inherited child pipes and blocked input cannot keep a timed-out operation waiting indefinitely. Synchronous disk writes cannot be interrupted during a kernel stall; deadline overruns fail once output handling returns. Audit queries validate integrity and collect recent events in one scan, with explicit file, line, and diagnostic bounds.
 
 ## Global serialization
 

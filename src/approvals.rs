@@ -364,6 +364,19 @@ fn set_permissions(_path: &Path, _mode: u32) -> Result<()> {
     Ok(())
 }
 
+/// Mutating execution requires explicit, currently valid approval evidence.
+/// Keep legacy inspection status semantics separate from this stricter gate.
+pub(crate) fn valid_execution_approval(record: &ApprovalRecord, now: OffsetDateTime) -> bool {
+    record.status == "approved"
+        && record.expires_at.as_deref().is_some_and(|value| {
+            OffsetDateTime::parse(value, &Rfc3339).is_ok_and(|expires_at| expires_at > now)
+        })
+        && record
+            .approved_by
+            .as_deref()
+            .is_some_and(|actor| !actor.trim().is_empty())
+}
+
 fn effective_status(record: &ApprovalRecord, now: OffsetDateTime) -> EffectiveApprovalStatus {
     if matches!(record.status.as_str(), "requested" | "approved") && is_expired(record, now) {
         return EffectiveApprovalStatus::Expired;

@@ -7749,12 +7749,7 @@ fn request_deploy_execution_command(
 
     let execution_token = expected_deploy_approval_token(&plan, snapshot_id);
     let scope = vec!["deploy_execution".to_string()];
-    let constraints = vec![
-        format!("plan_id={}", plan.id),
-        format!("execution_approval_token={execution_token}"),
-        "execution must use opsctl deploy --execute or opsctl helper run-deploy-operation"
-            .to_string(),
-    ];
+    let constraints = deploy::deploy_execution_constraints(&plan, snapshot_id)?;
     let approval = request_approval(&ApprovalRequestOptions {
         registry_root: &paths.registry_dir,
         plan_id: &plan.id,
@@ -7800,12 +7795,7 @@ fn request_deploy_resume_command(
 
     let resume_token = expected_deploy_resume_approval_token(&plan, journal_id);
     let scope = vec![expected_deploy_resume_approval_scope(journal_id)];
-    let constraints = vec![
-        format!("plan_id={}", plan.id),
-        format!("journal_id={journal_id}"),
-        format!("resume_approval_token={resume_token}"),
-        "execution must use opsctl deploy-resume --execute".to_string(),
-    ];
+    let constraints = deploy::deploy_resume_constraints(&plan, journal_id)?;
     let approval = request_approval(&ApprovalRequestOptions {
         registry_root: &paths.registry_dir,
         plan_id: &plan.id,

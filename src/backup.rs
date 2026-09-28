@@ -5,7 +5,6 @@ use std::{
     fs,
     io::{self, BufRead, Read, Write},
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
 };
 
 use anyhow::{Context, Result};
@@ -5822,34 +5821,13 @@ fn execute_database_dump(
     let Some((program, args)) = argv.split_first() else {
         anyhow::bail!("database dump argv is empty");
     };
-    let mut child = Command::new(program)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .with_context(|| format!("failed to start database dump command: {program}"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .context("failed to capture database dump stdout")?;
-    if let Err(error) = write_database_dump_output(stdout, &temporary_path, compressed) {
-        let _ = child.kill();
-        let _ = child.wait();
-        let _ = fs::remove_file(&temporary_path);
-        return Err(error);
-    }
-    let status = child
-        .wait()
-        .with_context(|| format!("failed to wait for database dump command: {program}"))?;
-    if !status.success() {
-        let _ = fs::remove_file(&temporary_path);
-        anyhow::bail!(
-            "database dump command {} failed with exit code {:?}",
-            program,
-            status.code()
-        );
-    }
+    write_database_dump_output(
+        program,
+        args,
+        &temporary_path,
+        compressed,
+        DumpLimits::from_environment()?,
+    )?;
     if let Ok(metadata) = fs::symlink_metadata(output_path) {
         if metadata.file_type().is_symlink() {
             let _ = fs::remove_file(&temporary_path);
@@ -5893,36 +5871,158 @@ fn temporary_dump_path(output_path: &Path) -> PathBuf {
     ))
 }
 
+#[derive(Clone, Copy)]
+struct DumpLimits {
+    timeout: std::time::Duration,
+    max_bytes: u64,
+    min_free_bytes: u64,
+}
+
+impl DumpLimits {
+    fn from_environment() -> Result<Self> {
+        fn limit(name: &str, default: u64, maximum: u64) -> Result<u64> {
+            let value = match env::var(name) {
+                Ok(value) => value
+                    .parse::<u64>()
+                    .with_context(|| format!("{name} must be an integer"))?,
+                Err(std::env::VarError::NotPresent) => default,
+                Err(_) => anyhow::bail!("{name} must be a valid integer"),
+            };
+            if value == 0 || value > maximum {
+                anyhow::bail!("{name} is outside the supported resource limits");
+            }
+            Ok(value)
+        }
+        Ok(Self {
+            timeout: std::time::Duration::from_secs(limit(
+                "OPSCTL_DUMP_TIMEOUT_SECONDS",
+                3600,
+                3600,
+            )?),
+            max_bytes: limit(
+                "OPSCTL_DUMP_MAX_BYTES",
+                64 * 1024 * 1024 * 1024,
+                1024 * 1024 * 1024 * 1024,
+            )?,
+            min_free_bytes: limit(
+                "OPSCTL_DUMP_MIN_FREE_BYTES",
+                256 * 1024 * 1024,
+                1024 * 1024 * 1024 * 1024,
+            )?,
+        })
+    }
+}
+
+struct DumpWriter {
+    file: fs::File,
+    limits: DumpLimits,
+    written: u64,
+}
+
+impl Write for DumpWriter {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.limits.max_bytes.saturating_sub(self.written) {
+            return Err(io::Error::new(
+                io::ErrorKind::FileTooLarge,
+                "database dump exceeded its byte limit",
+            ));
+        }
+        #[cfg(unix)]
+        {
+            let space = rustix::fs::fstatvfs(&self.file)?;
+            let available = space.f_bavail.saturating_mul(space.f_frsize);
+            if available.saturating_sub(bytes.len() as u64) < self.limits.min_free_bytes {
+                return Err(io::Error::other(
+                    "database dump would consume the reserved free space",
+                ));
+            }
+        }
+        let written = self.file.write(bytes)?;
+        self.written += written as u64;
+        Ok(written)
+    }
+    fn flush(&mut self) -> io::Result<()> {
+        self.file.flush()
+    }
+}
+
 fn write_database_dump_output(
-    stdout: impl io::Read,
+    program: &str,
+    args: &[String],
     output_path: &Path,
     compressed: bool,
+    limits: DumpLimits,
 ) -> Result<()> {
+    let started = std::time::Instant::now();
     if let Some(parent) = output_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create {}", parent.display()))?;
+        fs::create_dir_all(parent).context("failed to create database dump directory")?;
     }
-    let mut output_options = fs::OpenOptions::new();
-    output_options.write(true).create_new(true);
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
-    output_options.mode(0o600);
-    let output = output_options
+    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    let file = options
         .open(output_path)
-        .with_context(|| format!("failed to create {}", output_path.display()))?;
-    if compressed {
-        let mut encoder = zstd::Encoder::new(output, 3)
-            .context("failed to initialize zstd database dump encoder")?;
-        let mut input = stdout;
-        io::copy(&mut input, &mut encoder).context("failed to write compressed database dump")?;
-        encoder
-            .finish()
-            .context("failed to finish compressed database dump")?;
-    } else {
-        let mut input = stdout;
-        let mut output = output;
-        io::copy(&mut input, &mut output).context("failed to write database dump")?;
+        .context("failed to create database dump")?;
+    let result = (|| -> Result<()> {
+        let output = DumpWriter {
+            file,
+            limits,
+            written: 0,
+        };
+        // Check capacity before starting a database process, even for an empty dump.
+        #[cfg(unix)]
+        {
+            let space = rustix::fs::fstatvfs(&output.file)?;
+            if space.f_bavail.saturating_mul(space.f_frsize) < limits.min_free_bytes {
+                anyhow::bail!("database dump free-space reserve is unavailable");
+            }
+        }
+        let output = if compressed {
+            let mut encoder = zstd::Encoder::new(output, 3)
+                .context("failed to initialize database dump compression")?;
+            command_runner::run_controlled_stream_timeout(
+                program,
+                args,
+                limits.max_bytes,
+                limits.timeout,
+                |bytes| {
+                    encoder
+                        .write_all(bytes)
+                        .context("failed to write compressed database dump")
+                },
+            )?;
+            encoder
+                .finish()
+                .context("failed to finish database dump compression")?
+        } else {
+            let mut output = output;
+            command_runner::run_controlled_stream_timeout(
+                program,
+                args,
+                limits.max_bytes,
+                limits.timeout,
+                |bytes| {
+                    output
+                        .write_all(bytes)
+                        .context("failed to write database dump")
+                },
+            )?;
+            output
+        };
+        output
+            .file
+            .sync_all()
+            .context("failed to sync database dump")?;
+        if started.elapsed() >= limits.timeout {
+            anyhow::bail!("database dump timed out before output publication");
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(output_path);
     }
-    Ok(())
+    result
 }
 
 fn execute_external_database_dump_script(
@@ -6810,6 +6910,87 @@ mod tests {
         },
         registry::{BackupDatabaseDump, BackupHistoryRecord, Registry},
     };
+
+    #[cfg(unix)]
+    #[test]
+    fn native_dump_stream_is_bounded_and_cleans_failed_outputs() -> Result<()> {
+        let temp = tempfile::TempDir::new()?;
+        let limits = super::DumpLimits {
+            timeout: std::time::Duration::from_millis(200),
+            max_bytes: 64,
+            min_free_bytes: 1,
+        };
+        for compressed in [false, true] {
+            let path = temp.path().join(if compressed {
+                "dump.sql.zst"
+            } else {
+                "dump.sql"
+            });
+            super::write_database_dump_output(
+                "/usr/bin/printf",
+                &["select 1;\n".into()],
+                &path,
+                compressed,
+                limits,
+            )?;
+            let bytes = std::fs::read(&path)?;
+            let decoded = if compressed {
+                zstd::decode_all(bytes.as_slice())?
+            } else {
+                bytes
+            };
+            assert_eq!(decoded, b"select 1;\n");
+            std::fs::remove_file(&path)?;
+            let overflow = super::DumpLimits {
+                max_bytes: 3,
+                ..limits
+            };
+            assert!(
+                super::write_database_dump_output(
+                    "/usr/bin/printf",
+                    &["too long".into()],
+                    &path,
+                    compressed,
+                    overflow
+                )
+                .is_err()
+            );
+            assert!(!path.exists());
+            assert!(
+                super::write_database_dump_output(
+                    "/bin/sh",
+                    &["-c".into(), "printf partial; sleep 10 & wait".into()],
+                    &path,
+                    compressed,
+                    limits
+                )
+                .is_err()
+            );
+            assert!(!path.exists());
+            assert!(
+                super::write_database_dump_output("/usr/bin/false", &[], &path, compressed, limits)
+                    .is_err()
+            );
+            assert!(!path.exists());
+        }
+        let path = temp.path().join("reserve.sql");
+        let no_space = super::DumpLimits {
+            min_free_bytes: u64::MAX,
+            ..limits
+        };
+        assert!(
+            super::write_database_dump_output(
+                "/usr/bin/printf",
+                &["select 1;".into()],
+                &path,
+                false,
+                no_space
+            )
+            .is_err()
+        );
+        assert!(!path.exists());
+        Ok(())
+    }
 
     #[test]
     fn backup_doctor_loads_example_registry() -> Result<()> {

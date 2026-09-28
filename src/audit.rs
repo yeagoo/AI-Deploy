@@ -4,7 +4,7 @@ use std::{
     collections::VecDeque,
     env,
     fs::{self, OpenOptions},
-    io::{BufRead, BufReader, Write},
+    io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
 };
 
@@ -193,102 +193,120 @@ impl AuditStore {
     }
 }
 
+const MAX_AUDIT_SCAN_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_AUDIT_LINE_BYTES: u64 = 128 * 1024;
+const MAX_INVALID_AUDIT_LINES: usize = 1000;
+
 pub fn inspect_audit_log(path: &Path) -> Result<AuditIntegrityReport> {
-    if !path.exists() {
-        return Ok(AuditIntegrityReport {
+    Ok(scan_audit_log(path, None)?.integrity)
+}
+
+pub fn query_audit_log(path: &Path, limit: usize) -> Result<AuditQueryReport> {
+    scan_audit_log(path, Some(limit.clamp(1, 1000)))
+}
+
+fn scan_audit_log(path: &Path, limit: Option<usize>) -> Result<AuditQueryReport> {
+    let mut report = AuditQueryReport {
+        path: path.to_string_lossy().into_owned(),
+        limit: limit.unwrap_or(0),
+        integrity: AuditIntegrityReport {
             path: path.to_string_lossy().into_owned(),
             exists: false,
             total_lines: 0,
             invalid_lines: Vec::new(),
-            warnings: vec!["audit log does not exist yet".to_string()],
-        });
+            warnings: Vec::new(),
+        },
+        events: Vec::new(),
+    };
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            report
+                .integrity
+                .warnings
+                .push("audit log does not exist yet".to_string());
+            return Ok(report);
+        }
+        Err(error) => return Err(error).context("failed to inspect audit log"),
+    };
+    report.integrity.exists = true;
+    if metadata.file_type().is_symlink() && limit.is_none() {
+        report
+            .integrity
+            .warnings
+            .push("audit log path is a symlink; integrity was not scanned".to_string());
+        return Ok(report);
     }
-
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("failed to inspect {}", path.display()))?;
-    if metadata.file_type().is_symlink() {
-        return Ok(AuditIntegrityReport {
-            path: path.to_string_lossy().into_owned(),
-            exists: true,
-            total_lines: 0,
-            invalid_lines: Vec::new(),
-            warnings: vec!["audit log path is a symlink; integrity was not scanned".to_string()],
-        });
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        anyhow::bail!("refusing to scan non-regular audit log or symlink");
     }
-
-    let file = fs::File::open(path)
-        .with_context(|| format!("failed to open audit log {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut total_lines = 0_usize;
-    let mut invalid_lines = Vec::new();
-    for (index, line) in reader.lines().enumerate() {
-        let line = line.with_context(|| format!("failed to read audit log {}", path.display()))?;
-        total_lines = index + 1;
-        if line.trim().is_empty() {
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+    let file = options.open(path).context("failed to open audit log")?;
+    let metadata = file
+        .metadata()
+        .context("failed to inspect opened audit log")?;
+    if !metadata.is_file() || metadata.len() > MAX_AUDIT_SCAN_BYTES {
+        anyhow::bail!(
+            "audit log must be a regular file within the 256 MiB scan limit; archive the log before retrying"
+        );
+    }
+    let mut reader = BufReader::new(file.take(MAX_AUDIT_SCAN_BYTES + 1));
+    let mut events = VecDeque::with_capacity(limit.unwrap_or(0));
+    let mut line = Vec::new();
+    let mut bytes_read = 0_u64;
+    let mut invalid_count = 0_usize;
+    loop {
+        line.clear();
+        let bytes = reader
+            .by_ref()
+            .take(MAX_AUDIT_LINE_BYTES + 1)
+            .read_until(b'\n', &mut line)
+            .context("failed to read audit log")?;
+        if bytes == 0 {
+            break;
+        }
+        bytes_read += bytes as u64;
+        if bytes_read > MAX_AUDIT_SCAN_BYTES || bytes as u64 > MAX_AUDIT_LINE_BYTES {
+            anyhow::bail!("audit log exceeds its scan or line size limit");
+        }
+        report.integrity.total_lines += 1;
+        if line.iter().all(u8::is_ascii_whitespace) {
             continue;
         }
-        if serde_json::from_str::<serde_json::Value>(&line).is_err() {
-            invalid_lines.push(index + 1);
+        match serde_json::from_slice::<serde_json::Value>(&line) {
+            Ok(value) => {
+                if let Some(limit) = limit {
+                    if events.len() == limit {
+                        events.pop_front();
+                    }
+                    events.push_back(audit_query_event(&value));
+                }
+            }
+            Err(_) => {
+                invalid_count += 1;
+                if report.integrity.invalid_lines.len() < MAX_INVALID_AUDIT_LINES {
+                    report
+                        .integrity
+                        .invalid_lines
+                        .push(report.integrity.total_lines);
+                }
+            }
         }
     }
-
-    let mut warnings = Vec::new();
-    if !invalid_lines.is_empty() {
-        warnings.push("audit log contains lines that are not valid JSON".to_string());
+    if invalid_count > 0 {
+        report
+            .integrity
+            .warnings
+            .push("audit log contains lines that are not valid JSON".to_string());
     }
-
-    Ok(AuditIntegrityReport {
-        path: path.to_string_lossy().into_owned(),
-        exists: true,
-        total_lines,
-        invalid_lines,
-        warnings,
-    })
-}
-
-pub fn query_audit_log(path: &Path, limit: usize) -> Result<AuditQueryReport> {
-    let limit = limit.clamp(1, 1000);
-    let integrity = inspect_audit_log(path)?;
-    if !path.exists() {
-        return Ok(AuditQueryReport {
-            path: path.to_string_lossy().into_owned(),
-            limit,
-            integrity,
-            events: Vec::new(),
-        });
+    if invalid_count > MAX_INVALID_AUDIT_LINES {
+        report.integrity.warnings.push(format!("invalid line list truncated to {MAX_INVALID_AUDIT_LINES} entries; {invalid_count} invalid lines detected"));
     }
-
-    let metadata = fs::symlink_metadata(path)
-        .with_context(|| format!("failed to inspect {}", path.display()))?;
-    if metadata.file_type().is_symlink() {
-        anyhow::bail!("refusing to query audit log symlink: {}", path.display());
-    }
-
-    let file = fs::File::open(path)
-        .with_context(|| format!("failed to open audit log {}", path.display()))?;
-    let reader = BufReader::new(file);
-    let mut events = VecDeque::with_capacity(limit);
-
-    for line in reader.lines() {
-        let line = line.with_context(|| format!("failed to read audit log {}", path.display()))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        if events.len() == limit {
-            events.pop_front();
-        }
-        events.push_back(audit_query_event(&value));
-    }
-
-    Ok(AuditQueryReport {
-        path: path.to_string_lossy().into_owned(),
-        limit,
-        integrity,
-        events: events.into_iter().collect(),
-    })
+    report.events = events.into_iter().collect();
+    Ok(report)
 }
 
 fn audit_query_event(value: &serde_json::Value) -> AuditQueryEvent {
@@ -411,6 +429,49 @@ mod tests {
     use tempfile::TempDir;
 
     use super::{AuditRecord, AuditStore, inspect_audit_log, query_audit_log};
+
+    #[test]
+    fn audit_scan_bounds_lines_and_invalid_line_output() -> Result<()> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("audit.log");
+        std::fs::write(&path, vec![b'x'; super::MAX_AUDIT_LINE_BYTES as usize + 1])?;
+        assert!(query_audit_log(&path, 20).is_err());
+        std::fs::write(
+            &path,
+            "invalid\n".repeat(super::MAX_INVALID_AUDIT_LINES + 10),
+        )?;
+        let report = query_audit_log(&path, 20)?;
+        assert_eq!(
+            report.integrity.total_lines,
+            super::MAX_INVALID_AUDIT_LINES + 10
+        );
+        assert_eq!(
+            report.integrity.invalid_lines.len(),
+            super::MAX_INVALID_AUDIT_LINES
+        );
+        assert!(
+            report
+                .integrity
+                .warnings
+                .iter()
+                .any(|warning| warning.contains("truncated"))
+        );
+        assert!(report.events.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn audit_query_refuses_symlink_and_non_regular_file() -> Result<()> {
+        let temp = TempDir::new()?;
+        let path = temp.path().join("audit.log");
+        let target = temp.path().join("target.log");
+        std::fs::write(&target, "{}\n")?;
+        std::os::unix::fs::symlink(&target, &path)?;
+        assert!(query_audit_log(&path, 20).is_err());
+        assert!(query_audit_log(temp.path(), 20).is_err());
+        Ok(())
+    }
 
     #[test]
     fn writes_audit_event_to_jsonl() -> Result<()> {

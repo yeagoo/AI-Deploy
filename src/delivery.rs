@@ -9,7 +9,7 @@ use time::{Duration, OffsetDateTime, format_description::well_known::Rfc3339};
 use std::os::unix::fs::OpenOptionsExt;
 
 use crate::{
-    approvals::{ApprovalFile, EffectiveApprovalStatus},
+    approvals::{ApprovalFile, valid_execution_approval},
     deploy::{
         DeployExecutionOptions, DeployOptions, DeployStatus, deploy_plan_sha256, execute_deploy,
         expected_deploy_approval_token, plan_deploy,
@@ -243,6 +243,9 @@ pub fn automatic_delivery(options: &DeliveryOptions<'_>) -> Result<AutomaticDeli
             "automatic delivery has an unfinished execution claim; inspect queue and deploy journals before manual recovery"
         );
     }
+    if matching_authorization(std::slice::from_ref(authorization), &authorization_plan).is_none() {
+        anyhow::bail!("automatic-delivery authorization expired before execution claim");
+    }
     let claim = AutomaticDeliveryClaim {
         schema_version: CLAIM_SCHEMA.to_string(),
         trigger_id: trigger_id.to_string(),
@@ -254,7 +257,6 @@ pub fn automatic_delivery(options: &DeliveryOptions<'_>) -> Result<AutomaticDeli
         status: "executing".to_string(),
     };
     write_record(&claim_path, &claim)?;
-    let execution_approvals = projected_execution_approvals(options.approvals, authorization);
 
     let snapshot = create_snapshot(&SnapshotOptions {
         state_dir: options.trigger.state_dir,
@@ -272,6 +274,8 @@ pub fn automatic_delivery(options: &DeliveryOptions<'_>) -> Result<AutomaticDeli
     if !verification.ok {
         anyhow::bail!("automatic delivery snapshot verification failed");
     }
+    let execution_approvals =
+        projected_execution_approvals(options.approvals, authorization, plan, &snapshot.id)?;
     let dry_run = plan_deploy(&DeployOptions {
         state_dir: options.trigger.state_dir,
         registry: options.registry,
@@ -459,13 +463,14 @@ fn matching_authorization<'a>(
 ) -> Option<&'a ApprovalFile> {
     let expected_scopes = plan.required_scopes.iter().collect::<BTreeSet<_>>();
     let expected_constraints = plan.constraints.iter().collect::<BTreeSet<_>>();
+    let now = OffsetDateTime::now_utc();
     approvals.iter().find(|approval| {
         let independently_approved = approval
             .record
             .approved_by
             .as_deref()
             .is_some_and(|approved_by| approved_by != approval.record.requested_by);
-        approval.effective_status == EffectiveApprovalStatus::Approved
+        valid_execution_approval(&approval.record, now)
             && independently_approved
             && plan.plan_id.as_deref() == Some(approval.record.plan_id.as_str())
             && approval.record.scope.iter().collect::<BTreeSet<_>>() == expected_scopes
@@ -476,20 +481,24 @@ fn matching_authorization<'a>(
 fn projected_execution_approvals(
     approvals: &[ApprovalFile],
     authorization: &ApprovalFile,
-) -> Vec<ApprovalFile> {
-    approvals
+    plan: &DeployPlan,
+    snapshot_id: &str,
+) -> Result<Vec<ApprovalFile>> {
+    let constraints = crate::deploy::deploy_execution_constraints(plan, Some(snapshot_id))?;
+    Ok(approvals
         .iter()
         .filter(|approval| approval.record.id != authorization.record.id)
         .cloned()
         .chain(std::iter::once({
             let mut projected = authorization.clone();
+            projected.record.constraints = constraints;
             projected
                 .record
                 .scope
                 .retain(|scope| scope != AUTOMATIC_DELIVERY_SCOPE);
             projected
         }))
-        .collect()
+        .collect())
 }
 
 fn verify_existing_result(
@@ -639,6 +648,33 @@ mod tests {
         let beyond = (OffsetDateTime::now_utc() + Duration::days(31)).format(&Rfc3339)?;
         validate_delivery_authorization_expiry(Some(&within))?;
         assert!(validate_delivery_authorization_expiry(Some(&beyond)).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn authorization_requires_current_expiry_and_nonempty_independent_approver() -> Result<()> {
+        let plan = authorization_plan();
+        let exact = approval(
+            &plan.constraints,
+            &[AUTOMATIC_DELIVERY_SCOPE, DEPLOY_EXECUTION_SCOPE],
+        );
+        let past = (OffsetDateTime::now_utc() - Duration::seconds(1)).format(&Rfc3339)?;
+        for expiry in [None, Some("invalid".to_string()), Some(past)] {
+            let mut invalid = exact.clone();
+            invalid.record.expires_at = expiry;
+            assert!(matching_authorization(&[invalid], &plan).is_none());
+        }
+        for actor in [None, Some(String::new()), Some(" \t".to_string())] {
+            let mut invalid = exact.clone();
+            invalid.record.approved_by = actor;
+            assert!(matching_authorization(&[invalid], &plan).is_none());
+        }
+        let mut revoked = exact.clone();
+        revoked.record.status = "rejected".to_string();
+        assert!(matching_authorization(&[revoked], &plan).is_none());
+        let mut stale_view = exact;
+        stale_view.effective_status = EffectiveApprovalStatus::Expired;
+        assert!(matching_authorization(&[stale_view], &plan).is_some());
         Ok(())
     }
 
